@@ -1,0 +1,55 @@
+# ---- weeb binary ----------------------------------------------------------
+# The compiled CLI lands at the repo root as `weeb` (anchored so it can't match
+# a future source dir of the same name).
+/weeb
+weeb.exe
+
+# ---- Go build & test artifacts --------------------------------------------
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Common output dirs
+/bin/
+/dist/
+/build/
+
+# Coverage / profiling
+*.cover
+coverage.*
+*.prof
+cpu.out
+mem.out
+
+# Go workspace (local, not committed)
+go.work
+go.work.sum
+
+# Vendored deps (weeb uses the module cache, not vendoring)
+/vendor/
+
+# ---- logs / scratch -------------------------------------------------------
+# weeb defaults its TUI log to $TMPDIR, but ignore any that land in-tree.
+weeb.log
+*.log
+tmp/
+*.tmp
+
+# ---- editors / OS ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ---- env / secrets --------------------------------------------------------
+.env
+.env.*
+!.env.example

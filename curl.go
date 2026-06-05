@@ -1,0 +1,336 @@
+package main
+
+import (
+	"encoding/base64"
+	"fmt"
+	"os"
+	"strings"
+
+	"charm.land/lipgloss/v2"
+)
+
+// ---- export: RequestSpec -> curl -------------------------------------------
+
+// toCurl renders a RequestSpec as a runnable curl command. When multiline is
+// true each header / data flag goes on its own backslash-continued line (the
+// "copy as cURL" shape); otherwise it's a single pipe-friendly line.
+func toCurl(spec RequestSpec, multiline bool) string {
+	method := strings.ToUpper(strings.TrimSpace(spec.Method))
+	if method == "" {
+		method = "GET"
+	}
+
+	head := "curl"
+	if method != "GET" {
+		head += " -X " + method
+	}
+	head += " " + shellQuote(spec.URL)
+
+	segs := []string{head}
+	for _, h := range spec.Headers {
+		if strings.TrimSpace(h.Key) == "" {
+			continue
+		}
+		segs = append(segs, "-H "+shellQuote(h.Key+": "+h.Value))
+	}
+	if len(spec.Body) > 0 && methodAllowsBody(method) {
+		segs = append(segs, "--data "+shellQuote(string(spec.Body)))
+	}
+
+	sep := " "
+	if multiline {
+		sep = " \\\n  "
+	}
+	return strings.Join(segs, sep)
+}
+
+// renderCurl is toCurl with light syntax color for display (TUI pane / a TTY).
+// With color == false it is byte-identical to toCurl, so it stays copy-pasteable.
+func renderCurl(spec RequestSpec, st styles, color, multiline bool) string {
+	if !color {
+		return toCurl(spec, multiline)
+	}
+	method := strings.ToUpper(strings.TrimSpace(spec.Method))
+	if method == "" {
+		method = "GET"
+	}
+	flag := func(s string) string { return lipgloss.NewStyle().Bold(true).Foreground(cMauve).Render(s) }
+	str := func(s string) string { return st.jsonStr.Render(s) }
+
+	head := lipgloss.NewStyle().Bold(true).Foreground(cGreen).Render("curl")
+	if method != "GET" {
+		head += " " + flag("-X") + " " +
+			lipgloss.NewStyle().Bold(true).Foreground(methodColor(method)).Render(method)
+	}
+	head += " " + lipgloss.NewStyle().Foreground(cBlue).Render(shellQuote(spec.URL))
+
+	segs := []string{head}
+	for _, h := range spec.Headers {
+		if strings.TrimSpace(h.Key) == "" {
+			continue
+		}
+		segs = append(segs, flag("-H")+" "+str(shellQuote(h.Key+": "+h.Value)))
+	}
+	if len(spec.Body) > 0 && methodAllowsBody(method) {
+		segs = append(segs, flag("--data")+" "+str(shellQuote(string(spec.Body))))
+	}
+
+	sep := " "
+	if multiline {
+		sep = " \\\n  "
+	}
+	return strings.Join(segs, sep)
+}
+
+// shellQuote single-quotes s for a POSIX shell unless it is already a bare,
+// safe token. Embedded single quotes become the standard '\” dance.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if shellSafe(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func shellSafe(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("._-/:@", r):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ---- import: curl -> RequestSpec -------------------------------------------
+
+// parseCurl turns a tokenized curl command (with or without a leading "curl")
+// into a RequestSpec. It understands the flags people actually paste — method,
+// headers, data, basic auth, user-agent/cookie/referer shortcuts — infers the
+// method (POST when there's a body, HEAD for -I), and silently ignores
+// transfer-only flags like -L/-k/--compressed that don't change the request.
+func parseCurl(argv []string) (RequestSpec, error) {
+	var spec RequestSpec
+	var data []string
+	methodSet, urlSet, forceGet, headOnly := false, false, false, false
+
+	take := func(i *int, flag, attached string) (string, error) {
+		if attached != "" {
+			return attached, nil
+		}
+		if *i+1 >= len(argv) {
+			return "", fmt.Errorf("curl: %s needs a value", flag)
+		}
+		*i++
+		return argv[*i], nil
+	}
+
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		if i == 0 && (arg == "curl" || strings.HasSuffix(arg, "/curl")) {
+			continue
+		}
+
+		// Split an attached short-flag value, e.g. -XPOST or -H'K: V'.
+		flag, attached := arg, ""
+		if len(arg) > 2 && arg[0] == '-' && arg[1] != '-' {
+			if strings.ContainsRune("XHduAbeom", rune(arg[1])) {
+				flag, attached = arg[:2], arg[2:]
+			}
+		}
+
+		switch flag {
+		case "-X", "--request":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			spec.Method, methodSet = strings.ToUpper(v), true
+
+		case "-H", "--header":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			if k, val, ok := strings.Cut(v, ":"); ok {
+				spec.Headers = append(spec.Headers, Header{Key: strings.TrimSpace(k), Value: strings.TrimSpace(val)})
+			}
+
+		case "-d", "--data", "--data-raw", "--data-ascii", "--data-binary", "--data-urlencode":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			if flag != "--data-raw" && strings.HasPrefix(v, "@") {
+				b, err := os.ReadFile(v[1:])
+				if err != nil {
+					return spec, fmt.Errorf("curl: reading %q: %w", v[1:], err)
+				}
+				v = string(b)
+			}
+			data = append(data, v)
+
+		case "-u", "--user":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			enc := base64.StdEncoding.EncodeToString([]byte(v))
+			spec.Headers = append(spec.Headers, Header{Key: "Authorization", Value: "Basic " + enc})
+
+		case "-A", "--user-agent":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			spec.Headers = append(spec.Headers, Header{Key: "User-Agent", Value: v})
+
+		case "-b", "--cookie":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			spec.Headers = append(spec.Headers, Header{Key: "Cookie", Value: v})
+
+		case "-e", "--referer":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			spec.Headers = append(spec.Headers, Header{Key: "Referer", Value: v})
+
+		case "--url":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			spec.URL, urlSet = v, true
+
+		case "-G", "--get":
+			forceGet = true
+		case "-I", "--head":
+			headOnly = true
+
+		// Flags that take a value we don't use — consume and drop it.
+		case "-o", "--output", "-m", "--max-time", "--connect-timeout", "--retry",
+			"-w", "--write-out", "-c", "--cookie-jar", "-T", "--upload-file",
+			"-E", "--cert", "--cacert", "--key", "--proxy", "-x":
+			if _, err := take(&i, flag, attached); err != nil {
+				return spec, err
+			}
+
+		default:
+			if strings.HasPrefix(arg, "-") && arg != "-" {
+				continue // unknown / boolean transfer flag: ignore
+			}
+			if !urlSet {
+				spec.URL, urlSet = arg, true
+			}
+		}
+	}
+
+	if len(data) > 0 {
+		spec.Body = []byte(strings.Join(data, "&"))
+	}
+	if !methodSet {
+		switch {
+		case headOnly:
+			spec.Method = "HEAD"
+		case forceGet:
+			spec.Method = "GET"
+		case len(data) > 0:
+			spec.Method = "POST"
+		default:
+			spec.Method = "GET"
+		}
+	}
+	if strings.TrimSpace(spec.URL) == "" {
+		return spec, fmt.Errorf("curl: no URL found in command")
+	}
+	return spec, nil
+}
+
+// tokenizeShell splits a pasted command line into argv the way a POSIX shell
+// would: honoring single/double quotes, backslash escapes, and backslash-newline
+// line continuations. It's intentionally small — enough to handle real curl
+// commands people copy from docs or DevTools.
+func tokenizeShell(s string) ([]string, error) {
+	var toks []string
+	var cur strings.Builder
+	inTok := false
+	flush := func() {
+		if inTok {
+			toks = append(toks, cur.String())
+			cur.Reset()
+			inTok = false
+		}
+	}
+
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			flush()
+			i++
+		case '\\':
+			if i+1 < len(s) && s[i+1] == '\n' {
+				i += 2 // line continuation
+				continue
+			}
+			if i+2 < len(s) && s[i+1] == '\r' && s[i+2] == '\n' {
+				i += 3
+				continue
+			}
+			if i+1 < len(s) {
+				cur.WriteByte(s[i+1])
+				inTok = true
+				i += 2
+			} else {
+				i++
+			}
+		case '\'':
+			inTok = true
+			i++
+			for i < len(s) && s[i] != '\'' {
+				cur.WriteByte(s[i])
+				i++
+			}
+			if i >= len(s) {
+				return nil, fmt.Errorf("unterminated single quote")
+			}
+			i++
+		case '"':
+			inTok = true
+			i++
+			for i < len(s) && s[i] != '"' {
+				if s[i] == '\\' && i+1 < len(s) {
+					switch s[i+1] {
+					case '"', '\\', '$', '`':
+						cur.WriteByte(s[i+1])
+						i += 2
+						continue
+					case '\n':
+						i += 2
+						continue
+					}
+				}
+				cur.WriteByte(s[i])
+				i++
+			}
+			if i >= len(s) {
+				return nil, fmt.Errorf("unterminated double quote")
+			}
+			i++
+		default:
+			cur.WriteByte(c)
+			inTok = true
+			i++
+		}
+	}
+	flush()
+	return toks, nil
+}

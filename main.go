@@ -1,0 +1,567 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+)
+
+func main() {
+	args := os.Args[1:]
+
+	if len(args) == 0 {
+		os.Exit(runTUI(nil)) // bare invocation: empty interactive builder
+	}
+
+	switch args[0] {
+	case "-h", "--help", "help":
+		printHelp(os.Stdout)
+		return
+	case "cert", "tls":
+		os.Exit(runCert(args[1:]))
+	case "curl", "import":
+		os.Exit(runCurlImport(args[1:]))
+	}
+
+	parsed, err := parseCLI(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		fmt.Fprintln(os.Stderr, "run 'weeb --help' for usage")
+		os.Exit(2)
+	}
+
+	// A URL opens the TUI prefilled by default; we fall back to a headless
+	// one-shot when the output is clearly script-bound or asked to be.
+	if parsed.headless() {
+		if parsed.url == "" {
+			fmt.Fprintln(os.Stderr, "weeb: no URL given")
+			fmt.Fprintln(os.Stderr, "run 'weeb --help' for usage")
+			os.Exit(2)
+		}
+		os.Exit(runCLI(parsed))
+	}
+	os.Exit(runTUI(&parsed)) // interactive — a URL is optional, fields can be filled in
+}
+
+// headless reports whether a parsed request should run as a one-shot CLI rather
+// than opening the interactive TUI. We go headless when output is shaped for a
+// pipe/script — stdout isn't a terminal, or a body is piped into stdin — or when
+// a flag asks for it (--no-tui, --raw, --to-curl).
+func (a cliArgs) headless() bool {
+	return a.noTUI || a.quiet || a.raw || a.toCurl || !stdoutIsTTY() || stdinIsPiped()
+}
+
+// ---- TUI mode --------------------------------------------------------------
+
+func runTUI(seed *cliArgs) int {
+	logger, dbg, cleanup := newLogger(modeTUI)
+	defer cleanup()
+
+	voice := newErrorChan()
+	if seed != nil {
+		mode, err := resolvePersona(seed.persona)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "weeb:", err)
+			return 2
+		}
+		voice = errorChanFor(mode)
+	}
+
+	client := newClient(logger, voice)
+	if seed != nil && seed.timeout > 0 {
+		client.http.Timeout = seed.timeout
+	}
+
+	m := newModel(client, logger, dbg)
+	if seed != nil {
+		m.prefill(*seed) // open ready-to-send from `weeb METHOD URL …`
+	}
+
+	// AltScreen is now declared per-frame via View().AltScreen (v2), not a
+	// program option.
+	p := tea.NewProgram(m)
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 1
+	}
+	return 0
+}
+
+// ---- CLI mode --------------------------------------------------------------
+
+type cliArgs struct {
+	method  string
+	url     string
+	headers []Header
+	body    []byte
+	timeout time.Duration
+	stats   bool
+	pretty  bool   // --pretty: force the pretty/colored view on
+	raw     bool   // --raw: force the raw view (server bytes as-is)
+	noTUI   bool   // --no-tui: run headless even at a terminal
+	quiet   bool   // -q/--quiet: headless, and suppress the stats block (body + errors only)
+	toCurl  bool   // --to-curl: print the curl equivalent instead of sending
+	persona string // --persona: error voice for this run (overrides WEEB_PERSONA)
+}
+
+// prettyOn resolves the body view: pretty is on by default (and at a TTY), with
+// --pretty / --raw / WEEB_PRETTY as overrides. (Pipes always get raw bytes; this
+// only affects the colored TTY render in emitResult.)
+func (a cliArgs) prettyOn() bool {
+	p := envBool("WEEB_PRETTY", true)
+	if a.pretty {
+		p = true
+	}
+	if a.raw {
+		p = false
+	}
+	return p
+}
+
+// runCLI fires a single request and routes output per the matrix:
+//
+//	stdout = response body only (clean, for pipes)
+//	stderr = weeb error (errorchan) + charm/log diagnostics + (at a TTY) status line
+//
+// Color is applied to stdout ONLY when stdout is a terminal, so a pipe always
+// receives the exact raw bytes the server sent (`weeb ... | jq` stays clean).
+func runCLI(a cliArgs) int {
+	spec := RequestSpec{Method: a.method, URL: a.url, Headers: a.headers, Body: a.body}
+
+	// --to-curl: export the request (with env prefills resolved, so it's a
+	// faithful reproduction of what weeb would send) instead of sending it.
+	if a.toCurl {
+		color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
+		fmt.Fprintln(os.Stdout, renderCurl(resolveSpec(spec), newStyles(), color, true))
+		return 0
+	}
+
+	persona, err := resolvePersona(a.persona)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 2
+	}
+
+	logger, _, cleanup := newLogger(modeCLI)
+	defer cleanup()
+
+	client := newClient(logger, errorChanFor(persona))
+	if a.timeout > 0 {
+		client.http.Timeout = a.timeout
+	}
+
+	res := client.Do(spec)
+	return emitResult(res, a.stats, a.quiet, a.prettyOn())
+}
+
+// runCurlImport handles `weeb curl <command>`: parse a curl command and run it.
+// The command may be one quoted string (we tokenize it) or already shell-split
+// argv (e.g. `weeb curl curl https://x -H 'a: b'`).
+func runCurlImport(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, `weeb: curl needs a command, e.g. weeb curl 'curl https://api.example.com -H "Accept: application/json"'`)
+		return 2
+	}
+
+	argv := args
+	if len(args) == 1 {
+		toks, err := tokenizeShell(args[0])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "weeb:", err)
+			return 2
+		}
+		argv = toks
+	}
+
+	spec, err := parseCurl(argv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 2
+	}
+
+	logger, _, cleanup := newLogger(modeCLI)
+	defer cleanup()
+	client := newClient(logger, newErrorChan())
+	res := client.Do(spec)
+	return emitResult(res, false, false, envBool("WEEB_PRETTY", true))
+}
+
+// emitResult writes one finished request per the output matrix: body to stdout
+// (raw when piped, colored at a TTY), and the stats block + weeb error to stderr.
+// The stats block shows automatically at a TTY (or with --stats when piping)
+// unless quiet suppresses it; the body and any error always go out.
+func emitResult(res Result, wantStats, quiet, pretty bool) int {
+	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
+
+	if !quiet && (color || wantStats) && res.Status != 0 {
+		st := newStyles()
+		fmt.Fprintln(os.Stderr, statusBadge(res, st))
+		if res.TLS != nil {
+			fmt.Fprintln(os.Stderr, renderConnTLS(res.TLS, st))
+		}
+		fmt.Fprintln(os.Stderr, renderTiming(res.Timing, st, 50))
+	}
+
+	if len(res.Body) > 0 {
+		if color {
+			// width 0 -> renderBody uses a sane default for markdown wrapping.
+			fmt.Fprintln(os.Stdout, renderBody(res.Body, res.ContentType, res.URL, newStyles(), true, pretty, 0))
+		} else {
+			os.Stdout.Write(res.Body)
+		}
+	}
+
+	if res.DisplayErr != "" {
+		fmt.Fprintln(os.Stderr, res.DisplayErr)
+	}
+
+	if !res.OK() {
+		return 1
+	}
+	return 0
+}
+
+// runCert handles `weeb cert <host>`: inspect a TLS endpoint and print a report.
+//
+//	weeb cert example.com
+//	weeb cert https://example.com:8443 --json
+//	weeb cert expired.badssl.com -k     # inspect anyway, don't fail on bad trust
+//
+// Exit code is non-zero when the chain is untrusted (unless -k) or expired, so
+// it doubles as a monitoring check.
+func runCert(args []string) int {
+	logger, _, cleanup := newLogger(modeCLI)
+	defer cleanup()
+
+	var target, persona string
+	var insecure, asJSON bool
+	timeout := defaultTimeout
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-k" || arg == "--insecure":
+			insecure = true
+		case arg == "--json":
+			asJSON = true
+		case arg == "--persona":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			persona = val
+		case arg == "--timeout":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			d, err := time.ParseDuration(val)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "weeb: bad --timeout %q: %v\n", val, err)
+				return 2
+			}
+			timeout = d
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			fmt.Fprintf(os.Stderr, "weeb: unknown flag %q\n", arg)
+			return 2
+		default:
+			if target != "" {
+				fmt.Fprintf(os.Stderr, "weeb: unexpected argument %q\n", arg)
+				return 2
+			}
+			target = arg
+		}
+	}
+
+	if target == "" {
+		fmt.Fprintln(os.Stderr, "weeb: cert needs a host, e.g. 'weeb cert example.com'")
+		return 2
+	}
+
+	personaMode, err := resolvePersona(persona)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 2
+	}
+	voice := errorChanFor(personaMode)
+
+	rlog := logger.With("op", "cert", "target", target)
+	rlog.Info("tls inspect")
+
+	rep, err := fetchCertReport(target, timeout, insecure)
+	if err != nil {
+		rlog.Error("tls inspect failed", "kind", KindTransport.String(), "err", err)
+		fmt.Fprintln(os.Stderr, voice.Render(KindTransport, 0, err))
+		return 1
+	}
+	rlog.Info("tls ok",
+		"version", rep.TLSVersion, "verified", rep.Verified, "chain", len(rep.Chain))
+
+	if asJSON {
+		out, _ := json.MarshalIndent(rep, "", "  ")
+		fmt.Fprintln(os.Stdout, string(out))
+		return certExit(rep, insecure)
+	}
+
+	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
+	fmt.Fprint(os.Stdout, renderCertReport(rep, newStyles(), color))
+	return certExit(rep, insecure)
+}
+
+// stdoutIsTTY reports whether stdout is a terminal (not a pipe or file).
+func stdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// parseCLI parses curl-flavoured args:
+//
+//	weeb [METHOD] URL [-H "K: V"]... [-d DATA] [--timeout DUR]
+//
+// METHOD is optional (defaults to GET). -d DATA may be @file, '-' (stdin), or a
+// literal string. When -d is omitted and stdin is piped, the pipe is read as the
+// body.
+func parseCLI(args []string) (cliArgs, error) {
+	a := cliArgs{method: "GET"}
+	methodSet := false
+	urlSet := false
+	bodySet := false
+
+	known := map[string]bool{
+		"GET": true, "POST": true, "PUT": true, "PATCH": true,
+		"DELETE": true, "HEAD": true, "OPTIONS": true,
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-H" || arg == "--header":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			k, v, ok := strings.Cut(val, ":")
+			if !ok {
+				return a, fmt.Errorf("bad header %q (want \"Key: Value\")", val)
+			}
+			a.headers = append(a.headers, Header{Key: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
+
+		case arg == "-d" || arg == "--data":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			body, err := readData(val)
+			if err != nil {
+				return a, err
+			}
+			a.body = body
+			bodySet = true
+
+		case arg == "-X" || arg == "--request":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.method = strings.ToUpper(val)
+			methodSet = true
+
+		case arg == "--timeout":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			d, err := time.ParseDuration(val)
+			if err != nil {
+				return a, fmt.Errorf("bad --timeout %q: %w", val, err)
+			}
+			a.timeout = d
+
+		case arg == "--stats" || arg == "-v" || arg == "--verbose":
+			a.stats = true
+
+		case arg == "--pretty":
+			a.pretty = true
+
+		case arg == "--raw":
+			a.raw = true
+
+		case arg == "--no-tui" || arg == "--headless":
+			a.noTUI = true
+
+		case arg == "-q" || arg == "--quiet":
+			a.quiet = true
+
+		case arg == "--persona":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.persona = val
+
+		case arg == "--to-curl" || arg == "--curl":
+			a.toCurl = true
+
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			return a, fmt.Errorf("unknown flag %q", arg)
+
+		default:
+			// Positional: METHOD then URL, or just URL.
+			if !methodSet && !urlSet && known[strings.ToUpper(arg)] {
+				a.method = strings.ToUpper(arg)
+				methodSet = true
+				continue
+			}
+			if !urlSet {
+				a.url = arg
+				urlSet = true
+				continue
+			}
+			return a, fmt.Errorf("unexpected argument %q", arg)
+		}
+	}
+
+	// A missing URL is fine when we're opening the interactive builder (the
+	// caller decides); it's only an error in headless mode (see main).
+
+	// No explicit body but stdin is piped -> read the pipe as the body.
+	if !bodySet && stdinIsPiped() {
+		body, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return a, fmt.Errorf("reading stdin: %w", err)
+		}
+		if len(body) > 0 {
+			a.body = body
+		}
+	}
+
+	return a, nil
+}
+
+func nextArg(args []string, i *int, flag string) (string, error) {
+	if *i+1 >= len(args) {
+		return "", fmt.Errorf("%s needs a value", flag)
+	}
+	*i++
+	return args[*i], nil
+}
+
+// readData resolves a -d value: @file reads a file, '-' reads stdin, anything
+// else is a literal.
+func readData(val string) ([]byte, error) {
+	switch {
+	case val == "-":
+		return io.ReadAll(os.Stdin)
+	case strings.HasPrefix(val, "@"):
+		b, err := os.ReadFile(val[1:])
+		if err != nil {
+			return nil, fmt.Errorf("reading %q: %w", val[1:], err)
+		}
+		return b, nil
+	default:
+		return []byte(val), nil
+	}
+}
+
+func stdinIsPiped() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice == 0
+}
+
+// ---- help ------------------------------------------------------------------
+
+func printHelp(w io.Writer) {
+	fmt.Fprint(w, `weeb — a terminal HTTP client (interactive TUI + scriptable CLI)
+
+USAGE
+  weeb                       launch the empty interactive TUI builder
+  weeb [METHOD] URL [opts]   open the TUI prefilled with the request
+  weeb cert HOST [opts]      inspect a TLS certificate / chain
+  weeb curl '<curl cmd>'     run a pasted curl command (import)
+
+  METHOD defaults to GET. A URL opens the interactive builder, BUT weeb runs a
+  headless one-shot instead when the output is script-bound — stdout isn't a
+  terminal (piped/redirected), a body is piped into stdin, or you pass --no-tui,
+  --raw, or --to-curl. In headless mode the response BODY goes to stdout (clean,
+  so it pipes into jq); errors and logs go to stderr (or a log file).
+
+OPTIONS
+  -H, --header "K: V"   add a request header (repeatable)
+  -d, --data DATA       request body; DATA may be:
+                          @file   read the file
+                          -       read stdin
+                          string  a literal body
+                        (if -d is omitted and stdin is piped, the pipe is the body)
+  -X, --request METHOD  set the method explicitly
+      --timeout DUR     request timeout, e.g. 10s, 500ms (default 30s)
+  -v, --stats           print a timing breakdown (dns/tcp/tls/send/wait/recv) and
+                        the negotiated TLS to stderr, even when piping
+      --pretty          force the pretty/colored body view (the default at a TTY:
+                        indent + syntax color, markdown rendered via glamour,
+                        and sniff of mislabeled JSON/XML/HTML)
+      --raw             force the raw body view — exactly the bytes the server
+                        sent, no reformatting or color (implies --no-tui)
+      --no-tui          run a headless one-shot even at a terminal (alias --headless)
+  -q, --quiet           headless, body only — suppress the stats block (errors still show)
+      --persona MODE    error voice: plain (default) | dere | tsun | yan
+                        (overrides WEEB_PERSONA for this run)
+      --to-curl         print the curl equivalent of the request, don't send
+  -h, --help            show this help
+
+CURL IMPORT (weeb curl '<command>')
+  Paste a curl command (from docs, DevTools "Copy as cURL", etc.) and weeb runs
+  it: -X/-H/-d/--data*, -u (basic auth), -A/-b/-e, @file bodies. Transfer-only
+  flags (-L, -k, --compressed, …) are ignored. The command may be one quoted
+  string or already shell-split.
+    weeb curl 'curl -X POST https://api.example.com/u -H "Accept: application/json" -d @body.json'
+
+CERT OPTIONS (weeb cert HOST)
+  -k, --insecure        inspect even if the chain is untrusted/expired
+      --json            emit the report as JSON (clean, for pipes/monitoring)
+      --timeout DUR     dial timeout (default 30s)
+      --persona MODE    error voice for dial failures (see --persona above)
+  exit code is non-zero when the chain is untrusted (unless -k) or expired,
+  so 'weeb cert' doubles as a cron/monitoring check.
+
+EXAMPLES
+  weeb GET  https://api.example.com/me
+  weeb POST https://api.example.com/users -H "Authorization: Bearer x" -d @body.json
+  weeb POST https://api.example.com/users -H "Content-Type: application/json" -d '{"name":"a"}'
+  echo '{"name":"a"}' | weeb POST https://api.example.com/users
+  weeb cert example.com
+  weeb cert https://example.com:8443 --json | jq .chain[0].days_until_expiry
+
+TUI KEYS
+  tab/shift+tab move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
+  ctrl+s send · ctrl+t inspect TLS cert · ctrl+x export as curl · ctrl+p pretty · ctrl+y 🌈 · ctrl+g debug
+  in the response pane: ↑↓ scroll · ←→ select section or node (JSON/XML/YAML) · enter fold · -/+ fold all
+
+ENVIRONMENT (prefills, applied unless you override them)
+  WEEB_BASE_URL    relative URLs ("/me") resolve against this base
+  WEEB_HEADERS     default headers on every request, "K:V;K2:V2"
+  WEEB_TOKEN       adds "Authorization: Bearer $WEEB_TOKEN" unless you set Authorization
+  WEEB_PERSONA     error voice: plain (default) | dere | tsun | yan
+  WEEB_RAINBOW     1/true to launch the TUI in 🌈 mode (toggle live with ctrl+y)
+  WEEB_PRETTY      pretty body view; on by default, set 0/false for raw (toggle: ctrl+p)
+
+LOGGING (structured diagnostics; never on stdout)
+  WEEB_LOG         debug|info|warn|error|off        (default: warn)
+  WEEB_LOG_FORMAT  text|json|logfmt                 (default: text)
+  WEEB_LOG_FILE    path; logs go here instead of stderr. In TUI mode logs always
+                   go to a file (default: $TMPDIR/weeb.log) so they never corrupt
+                   the screen; toggle the in-app debug pane with ctrl+g.
+`)
+}
