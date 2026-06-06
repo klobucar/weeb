@@ -90,6 +90,24 @@ func (m *model) addSection(title, summary, body string) {
 	})
 }
 
+// addSectionDefault appends a section like addSection, but seeds an unseen
+// section's fold state from defFold instead of always-expanded — used by the cert
+// view so per-cert detail blocks start collapsed the first time, while still
+// honoring the user's sticky choice on later renders.
+func (m *model) addSectionDefault(title, summary, body string, defFold bool) {
+	folded, seen := m.foldState[title]
+	if !seen {
+		folded = defFold
+	}
+	m.respSections = append(m.respSections, respSection{
+		title:   title,
+		summary: summary,
+		body:    body,
+		folded:  folded,
+	})
+	m.foldState[title] = folded
+}
+
 // addBodySection appends the Body section, attaching whichever structural tree
 // was parsed (JSON or XML/HTML); both may be nil for a plain-text body.
 func (m *model) addBodySection(summary, body string, tree *bnode, xtree *xnode, ytree *ynode) {
@@ -259,9 +277,10 @@ func (m *model) composeResponse() string {
 
 // ---- fold cursor / toggles -------------------------------------------------
 
-// hasSections reports whether the response pane currently shows foldable content.
+// hasSections reports whether the pane currently shows foldable content — true
+// for both the HTTP response and the TLS cert view, which share the section model.
 func (m *model) hasSections() bool {
-	return m.pane == paneResponse && len(m.respSections) > 0
+	return (m.pane == paneResponse || m.pane == paneCert) && len(m.respSections) > 0
 }
 
 func (m *model) moveFoldCursor(dir int) {

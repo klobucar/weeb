@@ -45,7 +45,7 @@ own site, leaf → ISRG Root:
 - **curl-shaped CLI** — `-H`, `-d @file`/`-`/stdin, `-X`, interleaved flags and positionals, just like you already type.
 - **curl import & export** — paste a `curl` command to run it (`weeb curl '…'`), or turn any request into one (`--to-curl`, or `ctrl+x` in the TUI).
 - **Pretty bodies** — JSON, XML, HTML & YAML get syntax color and **collapsible folding**; Markdown gets a full [Glamour](https://github.com/charmbracelet/glamour) render. `--raw` for the exact bytes.
-- **TLS inspection** — chain, expiry, SANs, ciphers, OCSP/SCT from `weeb cert example.com`, without fighting `openssl`.
+- **TLS inspection** — a friendlier `openssl s_client`: full chain, expiry, SANs, ciphers, OCSP/SCT, plus `--starttls`, `--sni` override, `--alpn`, version pinning, client certs, and `--pem` dump.
 - **Timing breakdown** — per-phase DNS / TCP / TLS / send / wait / recv stats with a colored bar.
 - **Two outputs, kept apart** — a human-facing error *voice* (configurable, optionally anime) and structured *logs* to a file.
 - **🌈 mode** — because sometimes you want rainbow vomit. `ctrl+y`.
@@ -159,20 +159,42 @@ In the TUI, `ctrl+x` shows the curl equivalent of the current form.
 
 ## TLS / certificate inspection
 
+`weeb cert` is meant to fully replace `openssl s_client -connect` for the things
+you actually use it for — and it prints a report you can read, with the full
+chain detailed, not just dumped:
+
 ```sh
 weeb cert example.com
 weeb cert https://example.com:8443 --json | jq '.chain[0].days_until_expiry'
+
+# STARTTLS for mail/etc. (port defaults to the protocol: 587/143/110/21)
+weeb cert smtp.gmail.com --starttls smtp
+
+# point at an IP but present a chosen SNI / servername
+weeb cert 93.184.216.34 --sni example.com
+
+# pull the chain as PEM (the `-showcerts` move) to grab intermediates
+weeb cert example.com --pem > chain.pem
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-k, --insecure` | Inspect even if the chain is untrusted/expired |
 | `--json` | Emit the report as JSON (for pipes/monitoring) |
+| `--pem` | Dump the chain as PEM (alias `--showcerts`) |
+| `--brief` | Show the leaf only, not full detail for every cert (alias `--short`) |
+| `--sni NAME` | Present this SNI/servername, decoupled from the dial host (alias `--servername`) |
+| `--starttls PROTO` | Upgrade via `smtp`/`imap`/`pop3`/`ftp` before the handshake |
+| `--alpn LIST` | Advertise ALPN protocols, e.g. `h2,http/1.1` |
+| `--tls VERSION` | Pin the handshake to `1.0`/`1.1`/`1.2`/`1.3` |
+| `--client-cert F` · `--client-key F` | Present a client certificate for mTLS (aliases `--cert`/`--key`) |
 | `--timeout DUR` | Dial timeout (default 30s) |
 
 The exit code is non-zero when the chain is untrusted (unless `-k`) or expired,
 so `weeb cert` doubles as a cron/monitoring check. In the TUI, `ctrl+t` inspects
-the cert of the URL you're pointed at.
+the cert of the URL you're pointed at — the report folds like a response, so each
+cert in the chain is a collapsible section (the leaf shows on load; the CA certs
+above it start folded — `←`/`→` to select, `enter` to open, `±` for all).
 
 ## TUI keys
 
