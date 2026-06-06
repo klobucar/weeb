@@ -214,37 +214,47 @@ func TestCertMsgRendering(t *testing.T) {
 	var m tea.Model = testModel()
 	m = send(t, m, tea.WindowSizeMsg{Width: 90, Height: 70})
 
-	// Success: a fake report should render into the response pane with a TLS heading.
+	// Success: a fake report (leaf + intermediate) should render into the pane.
 	rep := &certReport{
 		Host: "example.com", Port: "443",
 		TLSVersion: "TLS 1.3", Cipher: "TLS_AES_128_GCM_SHA256", Verified: true,
-		Chain: []certInfo{{
-			SubjectCN: "example.com", Issuer: "CN=R3", IssuerCN: "R3",
-			NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<33, 0),
-			DaysUntilExpiry: 90, DNSNames: []string{"example.com"},
-			Serial: "AB:CD", KeyType: "RSA 2048", SigAlg: "SHA256-RSA",
-		}},
+		Chain: []certInfo{
+			{
+				SubjectCN: "example.com", Issuer: "CN=R3", IssuerCN: "R3",
+				NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<33, 0),
+				DaysUntilExpiry: 90, DNSNames: []string{"example.com"},
+				Serial: "AB:CD", KeyType: "RSA 2048", SigAlg: "SHA256-RSA",
+			},
+			{
+				SubjectCN: "R3", Issuer: "CN=Root", IssuerCN: "Root",
+				NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<33, 0),
+				DaysUntilExpiry: 900, Serial: "EF", KeyType: "RSA 4096", SigAlg: "SHA256-RSA",
+			},
+		},
 	}
 	m = send(t, m, certMsg{rep: rep})
 	out := m.View().Content
 	if !strings.Contains(out, "TLS  example.com:443") {
 		t.Fatalf("cert pane heading missing:\n%s", out)
 	}
-	if !strings.Contains(out, "Leaf") {
-		t.Fatalf("leaf section heading missing:\n%s", out)
+	if !strings.Contains(out, "Leaf") || !strings.Contains(out, "Intermediate") {
+		t.Fatalf("chain section headings missing:\n%s", out)
 	}
-	// The per-cert detail starts folded, so the Key row stays hidden until opened.
-	if strings.Contains(out, "RSA 2048") {
-		t.Fatalf("leaf detail should start folded:\n%s", out)
+	// The leaf detail shows on load; the CA cert above it starts folded.
+	if !strings.Contains(out, "RSA 2048") {
+		t.Fatalf("leaf detail should show on load:\n%s", out)
+	}
+	if strings.Contains(out, "RSA 4096") {
+		t.Fatalf("intermediate detail should start folded:\n%s", out)
 	}
 
-	// Focus the response pane and unfold all — the leaf detail becomes visible.
+	// Focus the response pane and unfold all — the intermediate detail appears.
 	mm := focusResponse(m.(model))
 	var tm tea.Model = mm
 	tm = send(t, tm, kp("+"))
 	final := tm.(model)
-	if out := final.composeResponse(); !strings.Contains(out, "RSA 2048") {
-		t.Fatalf("leaf detail missing after unfold:\n%s", out)
+	if out := final.composeResponse(); !strings.Contains(out, "RSA 4096") {
+		t.Fatalf("intermediate detail missing after unfold:\n%s", out)
 	}
 
 	// Failure: a dial error should route through the persona voice into the pane.

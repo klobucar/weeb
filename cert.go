@@ -474,7 +474,7 @@ func renderCertReport(rep *certReport, st styles, colorize bool, width int, deta
 // certSection is one block of the TLS report — a heading, an optional parenthetical
 // summary, and a body of rows. The same blocks render flat (CLI) or as foldable
 // response-pane sections (TUI), so the two views never drift apart. defaultFold
-// marks blocks the TUI collapses on first show (the per-cert detail dumps).
+// marks blocks the TUI collapses on first show (the CA certs above the leaf).
 type certSection struct {
 	title       string
 	summary     string
@@ -576,7 +576,7 @@ func certSections(rep *certReport, st styles, colorize bool, width int, detail b
 			title:       label,
 			summary:     c.name(),
 			body:        strings.TrimRight(db.String(), "\n"),
-			defaultFold: true,
+			defaultFold: i != 0, // leaf shows on load; CA certs above it start folded
 		})
 	}
 	return secs

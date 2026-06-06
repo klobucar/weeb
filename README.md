@@ -193,8 +193,8 @@ weeb cert example.com --pem > chain.pem
 The exit code is non-zero when the chain is untrusted (unless `-k`) or expired,
 so `weeb cert` doubles as a cron/monitoring check. In the TUI, `ctrl+t` inspects
 the cert of the URL you're pointed at — the report folds like a response, so each
-cert in the chain is a collapsible section (the per-cert detail starts folded;
-`←`/`→` to select, `enter` to open, `±` for all).
+cert in the chain is a collapsible section (the leaf shows on load; the CA certs
+above it start folded — `←`/`→` to select, `enter` to open, `±` for all).
 
 ## TUI keys
 

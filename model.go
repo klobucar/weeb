@@ -944,8 +944,8 @@ func (m *model) renderResult(r Result) {
 
 // renderCert fills the response viewport with a TLS report (or the errorchan
 // voice on dial failure), reusing the response pane and its persona seam. The
-// report's blocks become foldable sections — the per-cert detail dumps start
-// folded, so the chain reads as an overview until you open a cert.
+// report's blocks become foldable sections — the leaf shows on load while the
+// CA certs above it start folded, so the chain reads as an overview by default.
 func (m *model) renderCert(msg certMsg) {
 	m.pane = paneCert
 	m.respPreamble = ""
