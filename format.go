@@ -159,7 +159,7 @@ func renderBody(body []byte, contentType, url string, st styles, color, pretty b
 			return colorizeJSON(out, st)
 		}
 		return out
-	case fmtXML, fmtHTML:
+	case fmtXML:
 		out, ok := prettyXML(body)
 		if !ok {
 			out = string(body)
@@ -168,6 +168,14 @@ func renderBody(body []byte, contentType, url string, st styles, color, pretty b
 			return colorizeMarkup(out, st)
 		}
 		return out
+	case fmtHTML:
+		// Render via the real HTML parser's tree when coloring; otherwise raw.
+		if color {
+			if root := parseHTMLTree(body, contentType, url, true); root != nil {
+				return renderXMLTree(root, st, nil)
+			}
+		}
+		return string(body)
 	case fmtMarkdown:
 		// Markdown is a full styled render (glamour), which is inherently ANSI;
 		// only do it when color is wanted, else fall back to the raw source.

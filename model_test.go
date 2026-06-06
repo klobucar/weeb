@@ -411,6 +411,43 @@ func TestYAMLFolding(t *testing.T) {
 	}
 }
 
+func TestHTMLFolding(t *testing.T) {
+	var m tea.Model = testModel()
+	m = send(t, m, tea.WindowSizeMsg{Width: 90, Height: 40})
+	r := sampleResult()
+	r.ContentType = "text/html"
+	r.Headers = http.Header{"Content-Type": []string{"text/html"}}
+	// Real-world HTML the lenient XML tokenizer chokes on: doctype, a <script>
+	// with a bare '<', and an unquoted attribute.
+	r.Body = []byte(`<!DOCTYPE html><html><head><title>weeb</title>` +
+		`<script>if (a < b) { go() }</script></head>` +
+		`<body class=main><h1>Hi</h1><p>ok</p></body></html>`)
+	m = send(t, m, resultMsg(r))
+	mm := focusResponse(m.(model))
+
+	if bodyXTree(mm) == nil {
+		t.Fatal("real-world HTML should parse into a fold tree (via x/net/html)")
+	}
+
+	// Targets: Connection, Headers, Body, then <html>, <head>, <body>.
+	ts := mm.foldTargets()
+	if len(ts) != 6 {
+		t.Fatalf("got %d fold targets, want 6: %+v", len(ts), ts)
+	}
+	n3, ok := ts[3].node.(*xnode)
+	if !ok || n3.name != "html" {
+		t.Fatalf("target 3 should be <html>, got %+v", ts[3].node)
+	}
+
+	// Fold <html> and confirm its descendants vanish.
+	var tm tea.Model = mm
+	tm = send(t, tm, kp("right"), kp("right"), kp("right"), kp("enter"))
+	mm = tm.(model)
+	if out := mm.composeResponse(); strings.Contains(out, "Hi") {
+		t.Fatalf("folding <html> should hide its contents:\n%s", out)
+	}
+}
+
 func TestSectionFolding(t *testing.T) {
 	var m tea.Model = testModel()
 	m = send(t, m, tea.WindowSizeMsg{Width: 90, Height: 40})

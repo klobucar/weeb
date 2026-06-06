@@ -892,10 +892,15 @@ func (m *model) renderResult(r Result) {
 			var xtree *xnode
 			var ytree *ynode
 			if m.pretty {
-				if tree = parseJSONTree(r.Body, r.ContentType, r.URL, true); tree == nil {
-					if xtree = parseXMLTree(r.Body, r.ContentType, r.URL, true); xtree == nil {
-						ytree = parseYAMLTree(r.Body, r.ContentType, r.URL, true)
-					}
+				switch detectFormat(r.ContentType, r.URL, r.Body, true) {
+				case fmtJSON:
+					tree = parseJSONTree(r.Body, r.ContentType, r.URL, true)
+				case fmtXML:
+					xtree = parseXMLTree(r.Body, r.ContentType, r.URL, true)
+				case fmtHTML:
+					xtree = parseHTMLTree(r.Body, r.ContentType, r.URL, true)
+				case fmtYAML:
+					ytree = parseYAMLTree(r.Body, r.ContentType, r.URL, true)
 				}
 			}
 			m.addBodySection(bodySummary(len(r.Body), r.ContentType),
