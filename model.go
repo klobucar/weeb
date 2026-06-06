@@ -172,6 +172,11 @@ func newModel(client *Client, logger *log.Logger, dbg *safeBuffer) model {
 		animating:   envTruthy("WEEB_RAINBOW"),
 		pretty:      envBool("WEEB_PRETTY", true), // pretty on by default; ctrl+p / WEEB_PRETTY=0 turns it off (raw)
 	}
+	// Wrap long lines inside the panes instead of clipping them off the right
+	// edge — bodies (pretty or raw) and log lines stay readable without
+	// horizontal scrolling.
+	m.resp.SoftWrap = true
+	m.debugView.SoftWrap = true
 	m.applyFocus()
 	return m
 }
