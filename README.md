@@ -22,6 +22,24 @@ runs headless, so `weeb GET url | jq` just works. JSON, XML, YAML, and Markdown
 bodies are pretty-printed and foldable, TLS certs are inspectable, and when a
 request goes sideways an optional anime persona tells you about it.
 
+## Demo
+
+Build a request, fire it, flip between pretty and raw, then collapse the
+response and fold open just the body (with a dash of 🌈):
+
+<p align="center">
+  <img src="assets/demo.gif" alt="Building a request, sending it, toggling pretty/raw, and folding the response" width="100%">
+</p>
+
+Inspect a live TLS certificate and chain with `ctrl+t` — here, Let's Encrypt's
+own site, leaf → ISRG Root:
+
+<p align="center">
+  <img src="assets/cert.gif" alt="Inspecting letsencrypt.org's TLS certificate and chain, then toggling back" width="100%">
+</p>
+
+<sub>Demos recorded with <a href="https://github.com/charmbracelet/vhs">VHS</a>.</sub>
+
 ## Features
 
 - **curl-shaped CLI** — `-H`, `-d @file`/`-`/stdin, `-X`, interleaved flags and positionals, just like you already type.
