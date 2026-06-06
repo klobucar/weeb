@@ -20,6 +20,7 @@ func TestSplitHostPort(t *testing.T) {
 		{"example.com:8443", "example.com", "8443"},
 		{"https://example.com:8443/x", "example.com", "8443"},
 		{"https://example.com/x", "example.com", "443"},
+		{"http://example.com/x", "example.com", "443"}, // cert keeps 443 regardless of scheme
 		{"example.com/", "example.com", "443"},
 	}
 	for _, c := range cases {

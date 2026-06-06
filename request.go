@@ -169,6 +169,13 @@ func resolveSpec(spec RequestSpec) RequestSpec {
 		}
 	}
 
+	// A schemeless host defaults to http (port 80) — type "example.com:8080" and
+	// it just works. (TLS cert inspection keeps its own https/443 default.) The
+	// leading-slash guard leaves a bare relative path alone for WEEB_BASE_URL.
+	if u := strings.TrimSpace(spec.URL); u != "" && !hasScheme(u) && !strings.HasPrefix(u, "/") {
+		spec.URL = "http://" + u
+	}
+
 	have := map[string]bool{}
 	for _, h := range spec.Headers {
 		if k := strings.TrimSpace(h.Key); k != "" {
