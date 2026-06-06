@@ -35,7 +35,7 @@ you about it.
 go install github.com/klobucar/weeb@latest
 ```
 
-Requires Go 1.26+. Or build from source:
+Requires Go 1.25+. Or build from source:
 
 ```sh
 git clone https://github.com/klobucar/weeb && cd weeb
