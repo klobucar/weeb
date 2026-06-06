@@ -163,3 +163,18 @@ func TestResolveSpecNoEnvIsNoop(t *testing.T) {
 		t.Errorf("relative URL without base should be untouched, got %q", got.URL)
 	}
 }
+
+func TestResolveSpecBareHostDefaultsHTTP(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "")
+	t.Setenv("WEEB_TOKEN", "")
+
+	// A schemeless host (with or without an explicit port) defaults to http.
+	if got := resolveSpec(RequestSpec{URL: "example.com:8080/p"}); got.URL != "http://example.com:8080/p" {
+		t.Errorf("bare host should default to http, got %q", got.URL)
+	}
+	// Already-schemed URLs are untouched (https stays https).
+	if got := resolveSpec(RequestSpec{URL: "https://example.com"}); got.URL != "https://example.com" {
+		t.Errorf("https URL should be untouched, got %q", got.URL)
+	}
+}

@@ -110,8 +110,10 @@ In headless mode the response **body** goes to stdout; weeb's errors, logs, and
 | `--to-curl` | Print the `curl` equivalent instead of sending |
 | `-h, --help` | Show help |
 
-`METHOD` is optional and defaults to `GET`. Color and pretty-printing apply only
-at a terminal; piped output is always the raw server bytes.
+`METHOD` is optional and defaults to `GET`. A URL with no scheme defaults to
+`http://` (port 80), so `weeb GET example.com:8080/health` just works — only
+`weeb cert` defaults to `https`/443. Color and pretty-printing apply only at a
+terminal; piped output is always the raw server bytes.
 
 ## Pretty, raw & folding
 
