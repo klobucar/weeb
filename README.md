@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/klobucar/weeb/actions/workflows/ci.yml"><img src="https://github.com/klobucar/weeb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
 ---
@@ -213,3 +214,7 @@ weeb deliberately keeps two concerns apart, joined at a single chokepoint:
 ## Built with
 
 [Bubble Tea](https://github.com/charmbracelet/bubbletea) · [Lip Gloss](https://github.com/charmbracelet/lipgloss) · [Bubbles](https://github.com/charmbracelet/bubbles) · [Glamour](https://github.com/charmbracelet/glamour) · [log](https://github.com/charmbracelet/log) · [go-errorchan](https://github.com/klobucar/go-errorchan)
+
+## License
+
+[MIT](LICENSE) © Jonathon Klobucar
