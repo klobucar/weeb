@@ -3,7 +3,48 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 )
+
+// wrapIndent hard-wraps each line of s to width, ANSI-aware, with a hanging
+// indent: continuation rows are indented two columns past the line's own
+// leading indentation so wrapped tree/JSON entries stay visually nested instead
+// of snapping back to column 0. Lines that already fit are left untouched.
+func wrapIndent(s string, width int) string {
+	if width < 8 {
+		return s
+	}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if ansi.StringWidth(line) <= width {
+			out = append(out, line)
+			continue
+		}
+		indent := 0
+		for indent < len(line) && line[indent] == ' ' {
+			indent++
+		}
+		hang := indent + 2
+		contBudget := width - hang
+		if contBudget < 8 { // too deeply nested to hang nicely — wrap flush
+			hang, contBudget = 0, width
+		}
+		pad := strings.Repeat(" ", hang)
+
+		out = append(out, ansi.Cut(line, 0, width)) // first row keeps native indent
+		total := ansi.StringWidth(line)
+		for pos := width; pos < total; pos += contBudget {
+			out = append(out, pad+ansi.Cut(line, pos, pos+contBudget))
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// setResp sets the response viewport's content, hang-indent wrapped to its width.
+func (m *model) setResp(content string) {
+	m.resp.SetContent(wrapIndent(content, m.resp.Width()))
+}
 
 // respSection is one collapsible block of the response pane. When folded, only
 // the heading line shows (with its summary); when expanded, body follows. The

@@ -172,10 +172,10 @@ func newModel(client *Client, logger *log.Logger, dbg *safeBuffer) model {
 		animating:   envTruthy("WEEB_RAINBOW"),
 		pretty:      envBool("WEEB_PRETTY", true), // pretty on by default; ctrl+p / WEEB_PRETTY=0 turns it off (raw)
 	}
-	// Wrap long lines inside the panes instead of clipping them off the right
-	// edge — bodies (pretty or raw) and log lines stay readable without
-	// horizontal scrolling.
-	m.resp.SoftWrap = true
+	// The response pane is hang-indent wrapped by setResp (continuation lines stay
+	// nested under their entry), so its own soft-wrap is off. The debug pane just
+	// soft-wraps log lines flush.
+	m.resp.SoftWrap = false
 	m.debugView.SoftWrap = true
 	m.applyFocus()
 	return m
@@ -300,7 +300,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Toggle back to the response view (recomposed so live fold state shows).
 				m.pane = paneResponse
 				m.respHeading = "📡 Response"
-				m.resp.SetContent(m.composeResponse())
+				m.setResp(m.composeResponse())
 				m.resp.GotoTop()
 				return m, nil
 			}
@@ -313,13 +313,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Toggle back to the response view.
 				m.pane = paneResponse
 				m.respHeading = "📡 Response"
-				m.resp.SetContent(m.composeResponse())
+				m.setResp(m.composeResponse())
 				m.resp.GotoTop()
 				return m, nil
 			}
 			m.pane = paneCurl
 			m.respHeading = "curl ⤵  (ctrl+x back)"
-			m.resp.SetContent(renderCurl(resolveSpec(m.specFromForm()), m.styles, true, true))
+			m.setResp(renderCurl(resolveSpec(m.specFromForm()), m.styles, true, true))
 			m.resp.GotoTop()
 			return m, nil
 
@@ -464,7 +464,7 @@ func (m *model) cycleFocus(dir int) {
 	// The fold-cursor highlight only shows while the response pane is focused,
 	// so re-render whenever focus crosses that boundary.
 	if m.pane == paneResponse && len(m.respSections) > 0 {
-		m.resp.SetContent(m.composeResponse())
+		m.setResp(m.composeResponse())
 	}
 }
 
@@ -946,7 +946,7 @@ func (m *model) renderResult(r Result) {
 	if m.respCursor >= len(m.respSections) {
 		m.respCursor = 0
 	}
-	m.resp.SetContent(m.composeResponse())
+	m.setResp(m.composeResponse())
 	m.resp.GotoTop()
 }
 
@@ -956,11 +956,11 @@ func (m *model) renderCert(msg certMsg) {
 	m.pane = paneCert
 	if msg.err != nil {
 		m.respHeading = "🔒 TLS"
-		m.resp.SetContent(m.styles.errText.Render(m.client.voice.Render(KindTransport, 0, msg.err)))
+		m.setResp(m.styles.errText.Render(m.client.voice.Render(KindTransport, 0, msg.err)))
 		m.resp.GotoTop()
 		return
 	}
 	m.respHeading = fmt.Sprintf("🔒 TLS  %s:%s", msg.rep.Host, msg.rep.Port)
-	m.resp.SetContent(renderCertReport(msg.rep, m.styles, true))
+	m.setResp(renderCertReport(msg.rep, m.styles, true, m.resp.Width()))
 	m.resp.GotoTop()
 }

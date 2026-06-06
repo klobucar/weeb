@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // certReport is the full result of a TLS inspection.
@@ -247,9 +248,9 @@ func certExit(rep *certReport, insecure bool) int {
 
 // renderCertReport produces the human-facing TLS report, colorized when color
 // is true.
-func renderCertReport(rep *certReport, st styles, color bool) string {
+func renderCertReport(rep *certReport, st styles, colorize bool, width int) string {
 	paint := func(s lipgloss.Style, txt string) string {
-		if color {
+		if colorize {
 			return s.Render(txt)
 		}
 		return txt
@@ -259,13 +260,28 @@ func renderCertReport(rep *certReport, st styles, color bool) string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(cPink)
 
 	var b strings.Builder
-	b.WriteString(paint(title, fmt.Sprintf("🔒 TLS  %s:%s", rep.Host, rep.Port)) + "\n\n")
 
+	// badge renders a filled pill (ink on a colored background) when coloring,
+	// else plain text — used for the trust verdict.
+	badge := func(text string, c color.Color) string {
+		if !colorize {
+			return text
+		}
+		return lipgloss.NewStyle().Bold(true).Foreground(cInk).Background(c).Padding(0, 1).Render(text)
+	}
+	header := func(text string) {
+		b.WriteString("\n" + paint(st.paneTitle, text) + "\n")
+	}
+	// Rows are "  <label·12> <value>"; long values word-wrap to the pane width,
+	// aligned under the value column (so SANs stay tidy, no mid-word breaks).
+	const valueCol = 2 + 12 + 1
 	row := func(k, v string) {
-		b.WriteString("  " + paint(st.jsonKey, fmt.Sprintf("%-12s", k)) + " " + v + "\n")
+		b.WriteString("  " + paint(st.jsonKey, fmt.Sprintf("%-12s", k)) + " " + wrapValue(v, valueCol, width) + "\n")
 	}
 
-	b.WriteString(paint(st.paneTitle, "Connection") + "\n")
+	b.WriteString(paint(title, fmt.Sprintf("🔒 TLS  %s:%s", rep.Host, rep.Port)) + "\n")
+
+	header("🤝 Connection")
 	row("Protocol", rep.TLSVersion)
 	row("Cipher", rep.Cipher)
 	if rep.ALPN != "" {
@@ -275,21 +291,20 @@ func renderCertReport(rep *certReport, st styles, color bool) string {
 	case rep.Skipped:
 		row("Trust", paint(st.meta, "— not checked (insecure)"))
 	case rep.Verified:
-		row("Trust", paint(ok, "✓ chain & hostname trusted"))
+		row("Trust", badge("✓ TRUSTED", cGreen)+paint(st.meta, "  chain & hostname"))
 	default:
-		row("Trust", paint(bad, "✗ "+rep.VerifyErr))
+		row("Trust", badge("✗ UNTRUSTED", cRed)+"  "+paint(bad, rep.VerifyErr))
 	}
-	row("OCSP", yesNo(rep.OCSPStapled, "stapled", "not stapled", st, ok, color))
+	row("OCSP", yesNo(rep.OCSPStapled, "stapled", "not stapled", st, ok, colorize))
 	row("SCTs", fmt.Sprintf("%d embedded", rep.SCTCount))
-	b.WriteString("\n")
 
 	if len(rep.Chain) > 0 {
 		leaf := rep.Chain[0]
-		b.WriteString(paint(st.paneTitle, "Certificate (leaf)") + "\n")
+		header("📜 Certificate (leaf)")
 		row("Subject", leaf.name())
 		row("Issuer", leaf.Issuer)
 		row("Valid from", leaf.NotBefore.Format("2006-01-02 15:04 MST"))
-		row("Valid until", leaf.NotAfter.Format("2006-01-02 15:04 MST")+"  "+expiryPhrase(leaf.DaysUntilExpiry, color))
+		row("Valid until", leaf.NotAfter.Format("2006-01-02 15:04 MST")+"  "+expiryPhrase(leaf.DaysUntilExpiry, colorize))
 		if len(leaf.DNSNames) > 0 {
 			row("SANs", strings.Join(leaf.DNSNames, ", "))
 		}
@@ -300,19 +315,62 @@ func renderCertReport(rep *certReport, st styles, color bool) string {
 		}
 		row("Serial", leaf.Serial)
 		row("SHA-256", leaf.SHA256)
-		b.WriteString("\n")
 
-		b.WriteString(paint(st.paneTitle, fmt.Sprintf("Chain (%d)", len(rep.Chain))) + "\n")
-		for i, c := range rep.Chain {
-			link := paint(st.meta, "← "+orFallback(c.IssuerCN, c.Issuer))
-			if c.SelfSigned {
-				link = paint(st.meta, "(self-signed root)")
+		header(fmt.Sprintf("🔗 Chain%s", paint(st.meta, fmt.Sprintf("  (%d presented)", len(rep.Chain)))))
+		for level, c := range certLadder(rep.Chain) {
+			pad := strings.Repeat("  ", level)
+			conn := ""
+			if level > 0 {
+				conn = paint(st.meta, "└─ ")
 			}
-			b.WriteString(fmt.Sprintf("  %s  %s  %s\n",
-				paint(st.meta, fmt.Sprintf("%d", i)), c.name(), link))
+			b.WriteString("  " + pad + conn + c.name + paint(st.meta, "  "+c.role) + "\n")
 		}
 	}
 	return b.String()
+}
+
+// wrapValue word-wraps a row value to the pane width, indenting continuation
+// lines to the value column so wrapped lists (SANs) stay aligned and break at
+// separators rather than mid-token. Returns v unchanged when it fits or width
+// is unknown.
+func wrapValue(v string, col, width int) string {
+	avail := width - col
+	if width <= 0 || avail < 8 || ansi.StringWidth(v) <= avail {
+		return v
+	}
+	var wrapped string
+	if strings.ContainsRune(v, ' ') {
+		wrapped = ansi.Wordwrap(v, avail, "") // multi-word (SANs): break at spaces only
+	} else {
+		wrapped = ansi.Hardwrap(v, avail, true) // single long token (serial/fingerprint)
+	}
+	pad := strings.Repeat(" ", col)
+	return strings.ReplaceAll(wrapped, "\n", "\n"+pad)
+}
+
+// ladderRung is one node in the issuance ladder (leaf → intermediate → root).
+type ladderRung struct{ name, role string }
+
+// certLadder turns the presented chain into a leaf→root issuance ladder,
+// appending the final root issuer (which a server usually doesn't send).
+func certLadder(chain []certInfo) []ladderRung {
+	var out []ladderRung
+	for i, c := range chain {
+		role := "intermediate"
+		switch {
+		case c.SelfSigned:
+			role = "root"
+		case i == 0:
+			role = "leaf"
+		}
+		out = append(out, ladderRung{c.name(), role})
+	}
+	if last := chain[len(chain)-1]; !last.SelfSigned {
+		if root := orFallback(last.IssuerCN, last.Issuer); root != "" {
+			out = append(out, ladderRung{root, "root"})
+		}
+	}
+	return out
 }
 
 // expiryPhrase renders a colored "(in N days)" / "(expired ...)" suffix.
@@ -335,14 +393,14 @@ func expiryPhrase(days int, colorize bool) string {
 	return txt
 }
 
-func yesNo(v bool, yes, no string, st styles, okStyle lipgloss.Style, color bool) string {
+func yesNo(v bool, yes, no string, st styles, okStyle lipgloss.Style, colorize bool) string {
 	if v {
-		if color {
+		if colorize {
 			return okStyle.Render("✓ " + yes)
 		}
 		return "✓ " + yes
 	}
-	if color {
+	if colorize {
 		return st.meta.Render("— " + no)
 	}
 	return "— " + no

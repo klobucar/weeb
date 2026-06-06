@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/term"
 )
 
 func main() {
@@ -311,8 +312,17 @@ func runCert(args []string) int {
 	}
 
 	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
-	fmt.Fprint(os.Stdout, renderCertReport(rep, newStyles(), color))
+	fmt.Fprint(os.Stdout, renderCertReport(rep, newStyles(), color, terminalWidth()))
 	return certExit(rep, insecure)
+}
+
+// terminalWidth returns stdout's column count, or 100 when it can't be detected
+// (e.g. piped) — used to wrap the cert report's long values.
+func terminalWidth() int {
+	if w, _, err := term.GetSize(os.Stdout.Fd()); err == nil && w > 0 {
+		return w
+	}
+	return 100
 }
 
 // stdoutIsTTY reports whether stdout is a terminal (not a pipe or file).
