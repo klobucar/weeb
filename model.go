@@ -597,7 +597,7 @@ func (m model) certCmd() tea.Cmd {
 	logger := m.logger
 	return func() tea.Msg {
 		logger.Info("tls inspect", "target", target)
-		rep, err := fetchCertReport(target, defaultTimeout, false)
+		rep, err := fetchCertReport(target, certOptions{timeout: defaultTimeout})
 		if err != nil {
 			logger.Error("tls inspect failed", "kind", KindTransport.String(), "err", err)
 		} else {

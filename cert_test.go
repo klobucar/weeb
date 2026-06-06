@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"crypto/tls"
+	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +95,7 @@ func TestFetchCertReport(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rep, err := fetchCertReport(srv.URL, 5*time.Second, false)
+	rep, err := fetchCertReport(srv.URL, certOptions{timeout: 5 * time.Second})
 	if err != nil {
 		t.Fatalf("fetchCertReport: %v", err)
 	}
@@ -111,4 +115,124 @@ func TestFetchCertReport(t *testing.T) {
 	if certExit(rep, true) != 0 {
 		t.Error("-k should make an untrusted cert pass")
 	}
+	if len(rep.rawCerts) != len(rep.Chain) {
+		t.Errorf("rawCerts (%d) should match chain length (%d)", len(rep.rawCerts), len(rep.Chain))
+	}
+	if pemOut := certPEM(rep); !strings.Contains(pemOut, "BEGIN CERTIFICATE") {
+		t.Errorf("certPEM should emit PEM blocks, got %q", pemOut)
+	}
+	if rep.SNI == "" {
+		t.Error("SNI should default to the dial host")
+	}
+}
+
+func TestSplitHostPortDefault(t *testing.T) {
+	if h, p := splitHostPortDefault("mail.example.com", "25"); h != "mail.example.com" || p != "25" {
+		t.Errorf("bare host should take default port: got (%q,%q)", h, p)
+	}
+	if _, p := splitHostPortDefault("mail.example.com:587", "25"); p != "587" {
+		t.Errorf("explicit port should win over default: got %q", p)
+	}
+}
+
+func TestDefaultCertPort(t *testing.T) {
+	cases := map[string]string{"smtp": "587", "imap": "143", "pop3": "110", "ftp": "21", "": "443", "weird": "443"}
+	for in, want := range cases {
+		if got := defaultCertPort(in); got != want {
+			t.Errorf("defaultCertPort(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParseTLSVersion(t *testing.T) {
+	cases := map[string]uint16{
+		"1.0": tls.VersionTLS10, "1.1": tls.VersionTLS11,
+		"1.2": tls.VersionTLS12, "1.3": tls.VersionTLS13,
+		"tls1.2": tls.VersionTLS12, "TLS1.3": tls.VersionTLS13,
+	}
+	for in, want := range cases {
+		got, err := parseTLSVersion(in)
+		if err != nil || got != want {
+			t.Errorf("parseTLSVersion(%q) = (%d,%v), want %d", in, got, err, want)
+		}
+	}
+	if _, err := parseTLSVersion("9.9"); err == nil {
+		t.Error("parseTLSVersion should reject unknown versions")
+	}
+}
+
+func TestSplitList(t *testing.T) {
+	got := splitList(" h2, http/1.1 ,, ")
+	if want := []string{"h2", "http/1.1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("splitList = %v, want %v", got, want)
+	}
+	if got := splitList("  "); got != nil {
+		t.Errorf("splitList of blanks should be nil, got %v", got)
+	}
+}
+
+func TestStartTLS(t *testing.T) {
+	cases := []struct {
+		proto string
+		serve func(*bufio.Reader, net.Conn)
+	}{
+		{"smtp", func(r *bufio.Reader, c net.Conn) {
+			fmt.Fprint(c, "220 mx ready\r\n")
+			_, _ = r.ReadString('\n') // EHLO
+			fmt.Fprint(c, "250-mx greets\r\n250 STARTTLS\r\n")
+			_, _ = r.ReadString('\n') // STARTTLS
+			fmt.Fprint(c, "220 go ahead\r\n")
+		}},
+		{"ftp", func(r *bufio.Reader, c net.Conn) {
+			fmt.Fprint(c, "220 ftp ready\r\n")
+			_, _ = r.ReadString('\n') // AUTH TLS
+			fmt.Fprint(c, "234 proceed\r\n")
+		}},
+		{"imap", func(r *bufio.Reader, c net.Conn) {
+			fmt.Fprint(c, "* OK ready\r\n")
+			_, _ = r.ReadString('\n') // a STARTTLS
+			fmt.Fprint(c, "a OK begin TLS\r\n")
+		}},
+		{"pop3", func(r *bufio.Reader, c net.Conn) {
+			fmt.Fprint(c, "+OK ready\r\n")
+			_, _ = r.ReadString('\n') // STLS
+			fmt.Fprint(c, "+OK begin\r\n")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.proto, func(t *testing.T) {
+			client, server := net.Pipe()
+			go func() {
+				defer server.Close()
+				tc.serve(bufio.NewReader(server), server)
+			}()
+			_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+			if err := startTLS(client, tc.proto); err != nil {
+				t.Fatalf("startTLS(%s): %v", tc.proto, err)
+			}
+			client.Close()
+		})
+	}
+}
+
+func TestStartTLSErrors(t *testing.T) {
+	// Unknown protocol fails before touching the connection.
+	client, server := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	if err := startTLS(client, "gopher"); err == nil {
+		t.Error("unknown protocol should error")
+	}
+
+	// A rejected upgrade (wrong status code) surfaces an error.
+	c2, s2 := net.Pipe()
+	go func() {
+		defer s2.Close()
+		fmt.Fprint(s2, "554 no service\r\n")
+	}()
+	_ = c2.SetDeadline(time.Now().Add(2 * time.Second))
+	if err := startTLS(c2, "smtp"); err == nil {
+		t.Error("a non-220 greeting should error")
+	}
+	c2.Close()
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -239,9 +240,9 @@ func runCert(args []string) int {
 	logger, _, cleanup := newLogger(modeCLI)
 	defer cleanup()
 
-	var target, persona string
-	var insecure, asJSON bool
-	timeout := defaultTimeout
+	var target, persona, clientCertPath, clientKeyPath string
+	var insecure, asJSON, asPEM bool
+	opts := certOptions{timeout: defaultTimeout}
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -250,6 +251,55 @@ func runCert(args []string) int {
 			insecure = true
 		case arg == "--json":
 			asJSON = true
+		case arg == "--pem" || arg == "--showcerts":
+			asPEM = true
+		case arg == "--sni" || arg == "--servername":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			opts.sni = val
+		case arg == "--starttls":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			opts.startTLS = val
+		case arg == "--alpn":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			opts.alpn = splitList(val)
+		case arg == "--tls":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			v, err := parseTLSVersion(val)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 2
+			}
+			opts.minVersion, opts.maxVersion = v, v
+		case arg == "--client-cert" || arg == "--cert":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			clientCertPath = val
+		case arg == "--client-key" || arg == "--key":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			clientKeyPath = val
 		case arg == "--persona":
 			val, err := nextArg(args, &i, arg)
 			if err != nil {
@@ -268,7 +318,7 @@ func runCert(args []string) int {
 				fmt.Fprintf(os.Stderr, "weeb: bad --timeout %q: %v\n", val, err)
 				return 2
 			}
-			timeout = d
+			opts.timeout = d
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			fmt.Fprintf(os.Stderr, "weeb: unknown flag %q\n", arg)
 			return 2
@@ -285,6 +335,20 @@ func runCert(args []string) int {
 		fmt.Fprintln(os.Stderr, "weeb: cert needs a host, e.g. 'weeb cert example.com'")
 		return 2
 	}
+	opts.insecure = insecure
+
+	if (clientCertPath == "") != (clientKeyPath == "") {
+		fmt.Fprintln(os.Stderr, "weeb: --client-cert and --client-key must be given together")
+		return 2
+	}
+	if clientCertPath != "" {
+		pair, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "weeb: load client cert: %v\n", err)
+			return 2
+		}
+		opts.clientCert = &pair
+	}
 
 	personaMode, err := resolvePersona(persona)
 	if err != nil {
@@ -296,7 +360,7 @@ func runCert(args []string) int {
 	rlog := logger.With("op", "cert", "target", target)
 	rlog.Info("tls inspect")
 
-	rep, err := fetchCertReport(target, timeout, insecure)
+	rep, err := fetchCertReport(target, opts)
 	if err != nil {
 		rlog.Error("tls inspect failed", "kind", KindTransport.String(), "err", err)
 		fmt.Fprintln(os.Stderr, voice.Render(KindTransport, 0, err))
@@ -305,6 +369,10 @@ func runCert(args []string) int {
 	rlog.Info("tls ok",
 		"version", rep.TLSVersion, "verified", rep.Verified, "chain", len(rep.Chain))
 
+	if asPEM {
+		fmt.Fprint(os.Stdout, certPEM(rep))
+		return certExit(rep, insecure)
+	}
 	if asJSON {
 		out, _ := json.MarshalIndent(rep, "", "  ")
 		fmt.Fprintln(os.Stdout, string(out))
@@ -538,9 +606,18 @@ CURL IMPORT (weeb curl '<command>')
   string or already shell-split.
     weeb curl 'curl -X POST https://api.example.com/u -H "Accept: application/json" -d @body.json'
 
-CERT OPTIONS (weeb cert HOST)
+CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   -k, --insecure        inspect even if the chain is untrusted/expired
       --json            emit the report as JSON (clean, for pipes/monitoring)
+      --pem             dump the chain as PEM (like -showcerts); --showcerts alias
+      --sni NAME        present this SNI/servername (decoupled from the dial host,
+                        so you can point at an IP); --servername alias
+      --starttls PROTO  upgrade via smtp | imap | pop3 | ftp before the handshake
+                        (default port follows the protocol: 587/143/110/21)
+      --alpn LIST       advertise these ALPN protocols, e.g. "h2,http/1.1"
+      --tls VERSION     pin the handshake to 1.0 | 1.1 | 1.2 | 1.3
+      --client-cert F   client certificate for mTLS (--cert alias)
+      --client-key  F   matching private key (--key alias; both required together)
       --timeout DUR     dial timeout (default 30s)
       --persona MODE    error voice for dial failures (see --persona above)
   exit code is non-zero when the chain is untrusted (unless -k) or expired,
@@ -553,6 +630,9 @@ EXAMPLES
   echo '{"name":"a"}' | weeb POST https://api.example.com/users
   weeb cert example.com
   weeb cert https://example.com:8443 --json | jq .chain[0].days_until_expiry
+  weeb cert smtp.gmail.com --starttls smtp
+  weeb cert 93.184.216.34 --sni example.com
+  weeb cert example.com --pem > chain.pem
 
 TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
