@@ -335,6 +335,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// ↑/↓ move between form fields. The response pane keeps them for
+		// scrolling, and the body textarea keeps them for line editing until the
+		// cursor is at its top/bottom edge — then they step to the next field.
+		if s := msg.String(); s == "up" || s == "down" {
+			dir := 1
+			if s == "up" {
+				dir = -1
+			}
+			switch m.currentFocus().kind {
+			case focResponse:
+				// fall through to viewport scrolling below
+			case focBody:
+				atEdge := !m.bodyEnabled() ||
+					(dir < 0 && m.body.Line() == 0) ||
+					(dir > 0 && m.body.Line() == m.body.LineCount()-1)
+				if atEdge {
+					m.cycleFocus(dir)
+					return m, textinput.Blink
+				}
+				// otherwise let the textarea move the cursor between lines
+			default:
+				m.cycleFocus(dir)
+				return m, textinput.Blink
+			}
+		}
+
 		// Field-specific keys that should not reach the text widgets.
 		switch m.currentFocus().kind {
 		case focMethod:

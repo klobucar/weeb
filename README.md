@@ -159,7 +159,7 @@ the cert of the URL you're pointed at.
 
 | Key | Action |
 |-----|--------|
-| `tab` / `shift+tab` | Move between fields |
+| `tab` / `shift+tab` · `↑` / `↓` | Move between fields (↑/↓ scroll in the response pane; edit lines in the body) |
 | `←` / `→` | Pick HTTP method (when the method field is focused) |
 | `ctrl+o` / `ctrl+r` | Add / remove a header row |
 | `ctrl+s` | Send the request |

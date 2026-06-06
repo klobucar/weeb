@@ -34,6 +34,10 @@ func kp(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyLeft}
 	case "right":
 		return tea.KeyPressMsg{Code: tea.KeyRight}
+	case "up":
+		return tea.KeyPressMsg{Code: tea.KeyUp}
+	case "down":
+		return tea.KeyPressMsg{Code: tea.KeyDown}
 	}
 	if strings.HasPrefix(s, "ctrl+") && len(s) == len("ctrl+")+1 {
 		return tea.KeyPressMsg{Code: rune(s[len("ctrl+")]), Mod: tea.ModCtrl}
@@ -159,6 +163,37 @@ func TestPrefill(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("prefilled header missing: %+v", m.headers)
+	}
+}
+
+func TestArrowFieldNav(t *testing.T) {
+	var m tea.Model = testModel()
+	m = send(t, m, tea.WindowSizeMsg{Width: 80, Height: 30})
+	mm := m.(model)
+	mm.focusIdx = 0 // method
+	mm.applyFocus()
+
+	// down: method -> URL
+	var tm tea.Model = mm
+	tm = send(t, tm, kp("down"))
+	fm := tm.(model)
+	if got := fm.currentFocus().kind; got != focURL {
+		t.Fatalf("down from method should focus URL, got %v", got)
+	}
+	// up: URL -> method
+	tm = send(t, tm, kp("up"))
+	fm = tm.(model)
+	if got := fm.currentFocus().kind; got != focMethod {
+		t.Fatalf("up should return to method, got %v", got)
+	}
+
+	// In the response pane, ↑/↓ scroll (they must not change focus).
+	fm.focusIdx = len(fm.focusList()) - 1 // response
+	fm.applyFocus()
+	tm = send(t, tea.Model(fm), kp("up"), kp("down"))
+	fm = tm.(model)
+	if got := fm.currentFocus().kind; got != focResponse {
+		t.Fatalf("↑/↓ in the response pane must not change focus, got %v", got)
 	}
 }
 

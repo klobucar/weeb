@@ -545,7 +545,7 @@ EXAMPLES
   weeb cert https://example.com:8443 --json | jq .chain[0].days_until_expiry
 
 TUI KEYS
-  tab/shift+tab move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
+  tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
   ctrl+s send · ctrl+t inspect TLS cert · ctrl+x export as curl · ctrl+p pretty · ctrl+y 🌈 · ctrl+g debug
   in the response pane: ↑↓ scroll · ←→ select section or node (JSON/XML/HTML/YAML) · enter fold · -/+ fold all
 
