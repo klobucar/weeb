@@ -16,22 +16,19 @@
 
 `weeb` is an interactive HTTP client for your terminal — and a curl-shaped
 one-liner when you pipe it. Give it a URL and it opens a full-screen request
-builder, prefilled and ready to send; the moment the output is script-bound
-(piped, redirected, or `--no-tui`/`--raw`/`--to-curl`) the same command drops to
-a clean headless one-shot, so `weeb GET url | jq` just works. JSON, XML, YAML,
-and Markdown bodies are pretty-printed and foldable; TLS certs are
-inspectable; and when a request goes sideways, an optional anime persona tells
-you about it.
+builder, ready to send. Pipe the output (or pass `--no-tui`) and the same command
+runs headless, so `weeb GET url | jq` just works. JSON, XML, YAML, and Markdown
+bodies are pretty-printed and foldable, TLS certs are inspectable, and when a
+request goes sideways an optional anime persona tells you about it.
 
 ## Features
 
-- **One binary, two modes** — a URL opens the interactive TUI prefilled; pipe it (or pass `--no-tui`) and the same command runs headless into `jq`.
 - **curl-shaped CLI** — `-H`, `-d @file`/`-`/stdin, `-X`, interleaved flags and positionals, just like you already type.
 - **curl import & export** — paste a `curl` command to run it (`weeb curl '…'`), or turn any request into one (`--to-curl`, or `ctrl+x` in the TUI).
 - **Pretty bodies** — JSON, XML, HTML & YAML get syntax color and **collapsible folding**; Markdown gets a full [Glamour](https://github.com/charmbracelet/glamour) render. `--raw` for the exact bytes.
-- **TLS inspection** — `weeb cert example.com` gives you the chain, expiry, ciphers, SANs, OCSP/SCT — without fighting `openssl`.
+- **TLS inspection** — chain, expiry, SANs, ciphers, OCSP/SCT from `weeb cert example.com`, without fighting `openssl`.
 - **Timing breakdown** — per-phase DNS / TCP / TLS / send / wait / recv stats with a colored bar.
-- **Two clean seams** — a human-facing error *voice* (cute, configurable) and structured *logs* (leveled, to a file), never tangled together.
+- **Two outputs, kept apart** — a human-facing error *voice* (configurable, optionally anime) and structured *logs* to a file.
 - **🌈 mode** — because sometimes you want rainbow vomit. `ctrl+y`.
 
 ## Install
@@ -129,9 +126,9 @@ weeb runs it:
 weeb curl 'curl -X POST https://api.example.com/u -H "Accept: application/json" -d @body.json'
 ```
 
-It understands `-X/-H/-d/--data*`, `-u` (basic auth), `-A/-b/-e`, and `@file`
-bodies, infers the method (POST when there's a body, HEAD for `-I`), and ignores
-transfer-only flags like `-L`, `-k`, `--compressed`.
+It handles whatever "Copy as cURL" produces: `-u` basic auth, `@file` bodies, and
+method inference (POST when there's a body, HEAD for `-I`). Transfer-only flags
+like `-L`, `-k`, and `--compressed` are ignored.
 
 Going the other way, turn the request you just built into a shareable command:
 
@@ -199,9 +196,8 @@ Logging is structured diagnostics, kept off stdout entirely:
 weeb deliberately keeps two concerns apart, joined at a single chokepoint:
 
 - **The voice** — the human-facing error rendering, powered by
-  [go-errorchan](https://github.com/klobucar/go-errorchan). Plain by default
-  (errors should be clear), with an opt-in cast of anime personas via
-  `WEEB_PERSONA` (`dere` · `tsun` · `yan`):
+  [go-errorchan](https://github.com/klobucar/go-errorchan). Plain by default,
+  with an opt-in cast of anime personas via `WEEB_PERSONA` (`dere` · `tsun` · `yan`):
 
   ```
   $ weeb GET https://nope.invalid
