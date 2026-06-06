@@ -93,11 +93,7 @@ func parseValue(dec *json.Decoder, key string) (*bnode, error) {
 		}
 	}
 	// Scalar: re-marshal the token so the formatting matches the original kind.
-	raw, err := json.Marshal(tok)
-	if err != nil {
-		return nil, err
-	}
-	return &bnode{kind: bScalar, key: key, scalar: string(raw)}, nil
+	return &bnode{kind: bScalar, key: key, scalar: jsonToken(tok)}, nil
 }
 
 // bnode satisfies foldNode so the shared fold-cursor machinery can walk it.
@@ -218,12 +214,19 @@ func foldCount(n *bnode) string {
 	return fmt.Sprintf("%d %s", c, unit)
 }
 
-func quoteKey(k string) string {
-	b, err := json.Marshal(k)
-	if err != nil {
-		return `"` + k + `"`
+func quoteKey(k string) string { return jsonToken(k) }
+
+// jsonToken encodes a decoded JSON token (string / number / bool / null) without
+// the HTML escaping that json.Marshal applies to <, >, and & by default, which is
+// meaningless and ugly for terminal display.
+func jsonToken(v any) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return fmt.Sprintf("%v", v)
 	}
-	return string(b)
+	return strings.TrimRight(buf.String(), "\n")
 }
 
 func colorKey(k string, st styles) string { return st.jsonKey.Render(quoteKey(k)) }
