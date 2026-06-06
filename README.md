@@ -8,13 +8,18 @@
   A colorful terminal HTTP client — an interactive TUI <em>and</em> a scriptable CLI, from one binary.
 </p>
 
+<p align="center">
+  <a href="https://github.com/klobucar/weeb/actions/workflows/ci.yml"><img src="https://github.com/klobucar/weeb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
 ---
 
-`weeb` is `curl` for people who like their terminal loud. Give it a URL and it
-opens a full-screen request builder prefilled and ready to send — but the moment
-the output is script-bound (piped, redirected, or `--no-tui`/`--raw`/`--to-curl`)
-it drops to a clean headless one-shot, so `weeb GET url | jq` just works. JSON,
-XML, and Markdown bodies are pretty-printed and foldable; TLS certs are
+`weeb` is an interactive HTTP client for your terminal — and a curl-shaped
+one-liner when you pipe it. Give it a URL and it opens a full-screen request
+builder, prefilled and ready to send; the moment the output is script-bound
+(piped, redirected, or `--no-tui`/`--raw`/`--to-curl`) the same command drops to
+a clean headless one-shot, so `weeb GET url | jq` just works. JSON, XML, YAML,
+and Markdown bodies are pretty-printed and foldable; TLS certs are
 inspectable; and when a request goes sideways, an optional anime persona tells
 you about it.
 
@@ -23,7 +28,7 @@ you about it.
 - **One binary, two modes** — a URL opens the interactive TUI prefilled; pipe it (or pass `--no-tui`) and the same command runs headless into `jq`.
 - **curl-shaped CLI** — `-H`, `-d @file`/`-`/stdin, `-X`, interleaved flags and positionals, just like you already type.
 - **curl import & export** — paste a `curl` command to run it (`weeb curl '…'`), or turn any request into one (`--to-curl`, or `ctrl+x` in the TUI).
-- **Pretty bodies** — JSON, XML & YAML get syntax color and **collapsible folding**; Markdown gets a full [Glamour](https://github.com/charmbracelet/glamour) render. `--raw` for the exact bytes.
+- **Pretty bodies** — JSON, XML, HTML & YAML get syntax color and **collapsible folding**; Markdown gets a full [Glamour](https://github.com/charmbracelet/glamour) render. `--raw` for the exact bytes.
 - **TLS inspection** — `weeb cert example.com` gives you the chain, expiry, ciphers, SANs, OCSP/SCT — without fighting `openssl`.
 - **Timing breakdown** — per-phase DNS / TCP / TLS / send / wait / recv stats with a colored bar.
 - **Two clean seams** — a human-facing error *voice* (cute, configurable) and structured *logs* (leveled, to a file), never tangled together.
@@ -98,7 +103,7 @@ By default, bodies at a terminal are pretty-printed and syntax-colored, and
 detected by Content-Type → URL extension → content sniff (so a GitHub raw
 `README.md` served as `text/plain` still renders):
 
-- **JSON / XML / YAML** — indented, colored, and **foldable** node-by-node.
+- **JSON / XML / HTML / YAML** — indented, colored, and **foldable** node-by-node (HTML via a real HTML5 parser, so messy real-world pages still fold).
 - **Markdown** — rendered with Glamour (headings, lists, code blocks, the works).
 - **Anything else** — shown as-is.
 
@@ -111,7 +116,7 @@ In the response pane, fold to cut the noise:
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Scroll |
-| `←` / `→` | Select a section or JSON/XML/YAML node |
+| `←` / `→` | Select a section or JSON/XML/HTML/YAML node |
 | `enter` | Fold / unfold the selection |
 | `-` / `+` | Fold / unfold everything |
 
