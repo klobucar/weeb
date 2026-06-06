@@ -297,11 +297,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.pane == paneCert {
-				// Toggle back to the response view (recomposed so live fold state shows).
-				m.pane = paneResponse
-				m.respHeading = "📡 Response"
-				m.setResp(m.composeResponse())
-				m.resp.GotoTop()
+				m.showResponse() // toggle back to the HTTP response view
 				return m, nil
 			}
 			m.inFlight = true
@@ -310,11 +306,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.ExportCurl):
 			if m.pane == paneCurl {
-				// Toggle back to the response view.
-				m.pane = paneResponse
-				m.respHeading = "📡 Response"
-				m.setResp(m.composeResponse())
-				m.resp.GotoTop()
+				m.showResponse() // toggle back to the HTTP response view
 				return m, nil
 			}
 			m.pane = paneCurl
@@ -381,8 +373,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case focResponse:
-			// Fold controls take precedence over viewport scrolling, but only
-			// when there are foldable sections (not on the cert view).
+			// Fold controls take precedence over viewport scrolling, whenever the
+			// pane has foldable sections (HTTP response or the TLS cert view).
 			if m.hasSections() {
 				switch {
 				case key.Matches(msg, m.keys.SectionPrev):
@@ -462,8 +454,8 @@ func (m *model) cycleFocus(dir int) {
 	m.focusIdx = (m.focusIdx%n + dir + n) % n
 	m.applyFocus()
 	// The fold-cursor highlight only shows while the response pane is focused,
-	// so re-render whenever focus crosses that boundary.
-	if m.pane == paneResponse && len(m.respSections) > 0 {
+	// so re-render whenever focus crosses that boundary (response or cert view).
+	if m.hasSections() {
 		m.setResp(m.composeResponse())
 	}
 }
@@ -951,9 +943,14 @@ func (m *model) renderResult(r Result) {
 }
 
 // renderCert fills the response viewport with a TLS report (or the errorchan
-// voice on dial failure), reusing the response pane and its persona seam.
+// voice on dial failure), reusing the response pane and its persona seam. The
+// report's blocks become foldable sections — the per-cert detail dumps start
+// folded, so the chain reads as an overview until you open a cert.
 func (m *model) renderCert(msg certMsg) {
 	m.pane = paneCert
+	m.respPreamble = ""
+	m.respSections = nil
+	m.respErr = ""
 	if msg.err != nil {
 		m.respHeading = "🔒 TLS"
 		m.setResp(m.styles.errText.Render(m.client.voice.Render(KindTransport, 0, msg.err)))
@@ -961,6 +958,29 @@ func (m *model) renderCert(msg certMsg) {
 		return
 	}
 	m.respHeading = fmt.Sprintf("🔒 TLS  %s:%s", msg.rep.Host, msg.rep.Port)
-	m.setResp(renderCertReport(msg.rep, m.styles, true, m.resp.Width()))
+	for _, s := range certSections(msg.rep, m.styles, true, m.resp.Width(), true) {
+		m.addSectionDefault(s.title, s.summary, s.body, s.defaultFold)
+	}
+	if m.respCursor >= len(m.foldTargets()) {
+		m.respCursor = 0
+	}
+	m.setResp(m.composeResponse())
+	m.resp.GotoTop()
+}
+
+// showResponse returns the pane to the last HTTP response, rebuilding its
+// sections so a cert/curl detour never leaves their content under the Response
+// heading. With no response yet, it clears to an empty response pane.
+func (m *model) showResponse() {
+	if m.lastResult != nil {
+		m.renderResult(*m.lastResult)
+		return
+	}
+	m.pane = paneResponse
+	m.respHeading = "📡 Response"
+	m.respPreamble = ""
+	m.respSections = nil
+	m.respErr = ""
+	m.setResp(m.composeResponse())
 	m.resp.GotoTop()
 }

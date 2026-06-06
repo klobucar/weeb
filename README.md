@@ -182,6 +182,7 @@ weeb cert example.com --pem > chain.pem
 | `-k, --insecure` | Inspect even if the chain is untrusted/expired |
 | `--json` | Emit the report as JSON (for pipes/monitoring) |
 | `--pem` | Dump the chain as PEM (alias `--showcerts`) |
+| `--brief` | Show the leaf only, not full detail for every cert (alias `--short`) |
 | `--sni NAME` | Present this SNI/servername, decoupled from the dial host (alias `--servername`) |
 | `--starttls PROTO` | Upgrade via `smtp`/`imap`/`pop3`/`ftp` before the handshake |
 | `--alpn LIST` | Advertise ALPN protocols, e.g. `h2,http/1.1` |
@@ -191,7 +192,9 @@ weeb cert example.com --pem > chain.pem
 
 The exit code is non-zero when the chain is untrusted (unless `-k`) or expired,
 so `weeb cert` doubles as a cron/monitoring check. In the TUI, `ctrl+t` inspects
-the cert of the URL you're pointed at.
+the cert of the URL you're pointed at — the report folds like a response, so each
+cert in the chain is a collapsible section (the per-cert detail starts folded;
+`←`/`→` to select, `enter` to open, `±` for all).
 
 ## TUI keys
 

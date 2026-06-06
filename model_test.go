@@ -230,8 +230,21 @@ func TestCertMsgRendering(t *testing.T) {
 	if !strings.Contains(out, "TLS  example.com:443") {
 		t.Fatalf("cert pane heading missing:\n%s", out)
 	}
-	if !strings.Contains(out, "RSA 2048") {
-		t.Fatalf("cert detail missing:\n%s", out)
+	if !strings.Contains(out, "Leaf") {
+		t.Fatalf("leaf section heading missing:\n%s", out)
+	}
+	// The per-cert detail starts folded, so the Key row stays hidden until opened.
+	if strings.Contains(out, "RSA 2048") {
+		t.Fatalf("leaf detail should start folded:\n%s", out)
+	}
+
+	// Focus the response pane and unfold all — the leaf detail becomes visible.
+	mm := focusResponse(m.(model))
+	var tm tea.Model = mm
+	tm = send(t, tm, kp("+"))
+	final := tm.(model)
+	if out := final.composeResponse(); !strings.Contains(out, "RSA 2048") {
+		t.Fatalf("leaf detail missing after unfold:\n%s", out)
 	}
 
 	// Failure: a dial error should route through the persona voice into the pane.

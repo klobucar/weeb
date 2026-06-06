@@ -241,7 +241,7 @@ func runCert(args []string) int {
 	defer cleanup()
 
 	var target, persona, clientCertPath, clientKeyPath string
-	var insecure, asJSON, asPEM bool
+	var insecure, asJSON, asPEM, brief bool
 	opts := certOptions{timeout: defaultTimeout}
 
 	for i := 0; i < len(args); i++ {
@@ -253,6 +253,8 @@ func runCert(args []string) int {
 			asJSON = true
 		case arg == "--pem" || arg == "--showcerts":
 			asPEM = true
+		case arg == "--brief" || arg == "--short":
+			brief = true
 		case arg == "--sni" || arg == "--servername":
 			val, err := nextArg(args, &i, arg)
 			if err != nil {
@@ -380,7 +382,7 @@ func runCert(args []string) int {
 	}
 
 	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
-	fmt.Fprint(os.Stdout, renderCertReport(rep, newStyles(), color, terminalWidth()))
+	fmt.Fprint(os.Stdout, renderCertReport(rep, newStyles(), color, terminalWidth(), !brief))
 	return certExit(rep, insecure)
 }
 
@@ -610,6 +612,7 @@ CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   -k, --insecure        inspect even if the chain is untrusted/expired
       --json            emit the report as JSON (clean, for pipes/monitoring)
       --pem             dump the chain as PEM (like -showcerts); --showcerts alias
+      --brief           show the leaf only, not full detail for every cert (--short)
       --sni NAME        present this SNI/servername (decoupled from the dial host,
                         so you can point at an IP); --servername alias
       --starttls PROTO  upgrade via smtp | imap | pop3 | ftp before the handshake

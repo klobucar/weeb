@@ -171,6 +171,35 @@ func TestSplitList(t *testing.T) {
 	}
 }
 
+func TestRenderCertReportDetail(t *testing.T) {
+	rep := &certReport{
+		Host: "example.com", Port: "443", SNI: "example.com",
+		TLSVersion: "TLS 1.3", Cipher: "TLS_AES_128_GCM_SHA256", Verified: true,
+		Chain: []certInfo{
+			{SubjectCN: "example.com", Issuer: "CN=R3", KeyType: "RSA 2048", Serial: "AB"},
+			{SubjectCN: "R3", Issuer: "CN=Root", KeyType: "RSA 4096", Serial: "CD"},
+		},
+	}
+	st := newStyles()
+
+	full := renderCertReport(rep, st, false, 100, true)
+	if !strings.Contains(full, "RSA 2048") || !strings.Contains(full, "RSA 4096") {
+		t.Errorf("full report should detail every cert:\n%s", full)
+	}
+
+	brief := renderCertReport(rep, st, false, 100, false)
+	if !strings.Contains(brief, "RSA 2048") {
+		t.Errorf("brief report should still show the leaf:\n%s", brief)
+	}
+	if strings.Contains(brief, "RSA 4096") {
+		t.Errorf("brief report should omit intermediate detail:\n%s", brief)
+	}
+	// The chain overview ladder shows regardless of brief.
+	if !strings.Contains(brief, "Chain") {
+		t.Errorf("brief report should still show the chain ladder:\n%s", brief)
+	}
+}
+
 func TestStartTLS(t *testing.T) {
 	cases := []struct {
 		proto string

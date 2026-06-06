@@ -456,109 +456,156 @@ func certExit(rep *certReport, insecure bool) int {
 
 // renderCertReport produces the human-facing TLS report, colorized when color
 // is true.
-func renderCertReport(rep *certReport, st styles, colorize bool, width int) string {
-	paint := func(s lipgloss.Style, txt string) string {
-		if colorize {
-			return s.Render(txt)
-		}
-		return txt
-	}
-	ok := lipgloss.NewStyle().Bold(true).Foreground(cGreen)
-	bad := lipgloss.NewStyle().Bold(true).Foreground(cRed)
+func renderCertReport(rep *certReport, st styles, colorize bool, width int, detail bool) string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(cPink)
 
 	var b strings.Builder
-
-	// badge renders a filled pill (ink on a colored background) when coloring,
-	// else plain text — used for the trust verdict.
-	badge := func(text string, c color.Color) string {
-		if !colorize {
-			return text
+	b.WriteString(paintIf(colorize, title, fmt.Sprintf("🔒 TLS  %s:%s", rep.Host, rep.Port)) + "\n")
+	for _, s := range certSections(rep, st, colorize, width, detail) {
+		head := paintIf(colorize, st.paneTitle, s.title)
+		if s.summary != "" {
+			head += paintIf(colorize, st.meta, "  ("+s.summary+")")
 		}
-		return lipgloss.NewStyle().Bold(true).Foreground(cInk).Background(c).Padding(0, 1).Render(text)
-	}
-	header := func(text string) {
-		b.WriteString("\n" + paint(st.paneTitle, text) + "\n")
-	}
-	// Rows are "  <label·12> <value>"; long values word-wrap to the pane width,
-	// aligned under the value column (so SANs stay tidy, no mid-word breaks).
-	const valueCol = 2 + 12 + 1
-	row := func(k, v string) {
-		b.WriteString("  " + paint(st.jsonKey, fmt.Sprintf("%-12s", k)) + " " + wrapValue(v, valueCol, width) + "\n")
-	}
-
-	b.WriteString(paint(title, fmt.Sprintf("🔒 TLS  %s:%s", rep.Host, rep.Port)) + "\n")
-
-	header("🤝 Connection")
-	if rep.StartTLS != "" {
-		row("STARTTLS", strings.ToLower(rep.StartTLS))
-	}
-	if rep.SNI != "" && rep.SNI != rep.Host {
-		row("SNI", rep.SNI)
-	}
-	row("Protocol", rep.TLSVersion)
-	row("Cipher", rep.Cipher)
-	if rep.ALPN != "" {
-		row("ALPN", rep.ALPN)
-	}
-	switch {
-	case rep.Skipped:
-		row("Trust", paint(st.meta, "— not checked (insecure)"))
-	case rep.Verified:
-		row("Trust", badge("✓ TRUSTED", cGreen)+paint(st.meta, "  chain & hostname"))
-	default:
-		row("Trust", badge("✗ UNTRUSTED", cRed)+"  "+paint(bad, rep.VerifyErr))
-	}
-	row("OCSP", yesNo(rep.OCSPStapled, "stapled", "not stapled", st, ok, colorize))
-	row("SCTs", fmt.Sprintf("%d embedded", rep.SCTCount))
-
-	if len(rep.Chain) > 0 {
-		// Overview ladder: leaf → intermediates → root at a glance.
-		header(fmt.Sprintf("🔗 Chain%s", paint(st.meta, fmt.Sprintf("  (%d presented)", len(rep.Chain)))))
-		for level, c := range certLadder(rep.Chain) {
-			pad := strings.Repeat("  ", level)
-			conn := ""
-			if level > 0 {
-				conn = paint(st.meta, "└─ ")
-			}
-			b.WriteString("  " + pad + conn + c.name + paint(st.meta, "  "+c.role) + "\n")
-		}
-
-		// Full detail for every presented cert, not just the leaf.
-		for i, c := range rep.Chain {
-			role, icon := "intermediate", "🔗"
-			switch {
-			case c.SelfSigned:
-				role = "root"
-			case i == 0:
-				role, icon = "leaf", "📜"
-			}
-			header(fmt.Sprintf("%s %s%s", icon, titleCase(role), paint(st.meta, "  "+c.name())))
-			row("Subject", c.Subject)
-			row("Issuer", c.Issuer)
-			row("Valid from", c.NotBefore.Format("2006-01-02 15:04 MST"))
-			row("Valid until", c.NotAfter.Format("2006-01-02 15:04 MST")+"  "+expiryPhrase(c.DaysUntilExpiry, colorize))
-			if len(c.DNSNames) > 0 {
-				row("SANs", strings.Join(c.DNSNames, ", "))
-			}
-			row("Key", c.KeyType)
-			row("Sig alg", c.SigAlg)
-			if len(c.ExtKeyUsage) > 0 {
-				row("Usage", strings.Join(c.ExtKeyUsage, ", "))
-			}
-			row("Serial", c.Serial)
-			row("SHA-256", c.SHA256)
-		}
+		b.WriteString("\n" + head + "\n" + s.body + "\n")
 	}
 	return b.String()
 }
 
-// titleCase upper-cases the first letter of an ASCII word (role labels).
-func titleCase(s string) string {
-	if s == "" {
-		return s
+// certSection is one block of the TLS report — a heading, an optional parenthetical
+// summary, and a body of rows. The same blocks render flat (CLI) or as foldable
+// response-pane sections (TUI), so the two views never drift apart. defaultFold
+// marks blocks the TUI collapses on first show (the per-cert detail dumps).
+type certSection struct {
+	title       string
+	summary     string
+	body        string
+	defaultFold bool
+}
+
+// certSections builds the report's blocks: Connection, the Chain overview ladder,
+// and one full-detail block per presented cert. With detail=false only the leaf's
+// detail is included (the CLI --brief view); the TUI always passes detail=true and
+// relies on folding to tuck the detail away.
+func certSections(rep *certReport, st styles, colorize bool, width int, detail bool) []certSection {
+	ok := lipgloss.NewStyle().Bold(true).Foreground(cGreen)
+	bad := lipgloss.NewStyle().Bold(true).Foreground(cRed)
+
+	var secs []certSection
+
+	var cb strings.Builder
+	if rep.StartTLS != "" {
+		certRow(&cb, st, colorize, width, "STARTTLS", strings.ToLower(rep.StartTLS))
 	}
-	return strings.ToUpper(s[:1]) + s[1:]
+	if rep.SNI != "" && rep.SNI != rep.Host {
+		certRow(&cb, st, colorize, width, "SNI", rep.SNI)
+	}
+	certRow(&cb, st, colorize, width, "Protocol", rep.TLSVersion)
+	certRow(&cb, st, colorize, width, "Cipher", rep.Cipher)
+	if rep.ALPN != "" {
+		certRow(&cb, st, colorize, width, "ALPN", rep.ALPN)
+	}
+	switch {
+	case rep.Skipped:
+		certRow(&cb, st, colorize, width, "Trust", paintIf(colorize, st.meta, "— not checked (insecure)"))
+	case rep.Verified:
+		certRow(&cb, st, colorize, width, "Trust", trustBadge("✓ TRUSTED", cGreen, colorize)+paintIf(colorize, st.meta, "  chain & hostname"))
+	default:
+		certRow(&cb, st, colorize, width, "Trust", trustBadge("✗ UNTRUSTED", cRed, colorize)+"  "+paintIf(colorize, bad, rep.VerifyErr))
+	}
+	certRow(&cb, st, colorize, width, "OCSP", yesNo(rep.OCSPStapled, "stapled", "not stapled", st, ok, colorize))
+	certRow(&cb, st, colorize, width, "SCTs", fmt.Sprintf("%d embedded", rep.SCTCount))
+	secs = append(secs, certSection{title: "🤝 Connection", body: strings.TrimRight(cb.String(), "\n")})
+
+	if len(rep.Chain) == 0 {
+		return secs
+	}
+
+	// Overview ladder: leaf → intermediates → root at a glance.
+	var lb strings.Builder
+	for level, c := range certLadder(rep.Chain) {
+		pad := strings.Repeat("  ", level)
+		conn := ""
+		if level > 0 {
+			conn = paintIf(colorize, st.meta, "└─ ")
+		}
+		lb.WriteString("  " + pad + conn + c.name + paintIf(colorize, st.meta, "  "+c.role) + "\n")
+	}
+	secs = append(secs, certSection{
+		title:   "🔗 Chain",
+		summary: fmt.Sprintf("%d presented", len(rep.Chain)),
+		body:    strings.TrimRight(lb.String(), "\n"),
+	})
+
+	// Full detail per presented cert. Titles are unique (Intermediate 2, …) so the
+	// TUI's title-keyed fold state stays stable across re-renders.
+	inter := 0
+	for i, c := range rep.Chain {
+		if !detail && i > 0 {
+			break // --brief: leaf only
+		}
+		role, icon := "Intermediate", "🔗"
+		switch {
+		case c.SelfSigned:
+			role = "Root"
+		case i == 0:
+			role, icon = "Leaf", "📜"
+		}
+		label := icon + " " + role
+		if role == "Intermediate" {
+			if inter++; inter > 1 {
+				label = fmt.Sprintf("%s %s %d", icon, role, inter)
+			}
+		}
+
+		var db strings.Builder
+		certRow(&db, st, colorize, width, "Subject", c.Subject)
+		certRow(&db, st, colorize, width, "Issuer", c.Issuer)
+		certRow(&db, st, colorize, width, "Valid from", c.NotBefore.Format("2006-01-02 15:04 MST"))
+		certRow(&db, st, colorize, width, "Valid until", c.NotAfter.Format("2006-01-02 15:04 MST")+"  "+expiryPhrase(c.DaysUntilExpiry, colorize))
+		if len(c.DNSNames) > 0 {
+			certRow(&db, st, colorize, width, "SANs", strings.Join(c.DNSNames, ", "))
+		}
+		certRow(&db, st, colorize, width, "Key", c.KeyType)
+		certRow(&db, st, colorize, width, "Sig alg", c.SigAlg)
+		if len(c.ExtKeyUsage) > 0 {
+			certRow(&db, st, colorize, width, "Usage", strings.Join(c.ExtKeyUsage, ", "))
+		}
+		certRow(&db, st, colorize, width, "Serial", c.Serial)
+		certRow(&db, st, colorize, width, "SHA-256", c.SHA256)
+		secs = append(secs, certSection{
+			title:       label,
+			summary:     c.name(),
+			body:        strings.TrimRight(db.String(), "\n"),
+			defaultFold: true,
+		})
+	}
+	return secs
+}
+
+// paintIf renders s only when colorize is set, else returns txt verbatim.
+func paintIf(colorize bool, s lipgloss.Style, txt string) string {
+	if colorize {
+		return s.Render(txt)
+	}
+	return txt
+}
+
+// trustBadge renders a filled pill (ink on a colored background) when coloring,
+// else plain text — used for the trust verdict.
+func trustBadge(text string, c color.Color, colorize bool) string {
+	if !colorize {
+		return text
+	}
+	return lipgloss.NewStyle().Bold(true).Foreground(cInk).Background(c).Padding(0, 1).Render(text)
+}
+
+// certValueCol is where row values start: "  " + 12-wide label + " ".
+const certValueCol = 2 + 12 + 1
+
+// certRow writes one "  <label·12> <value>" line; long values word-wrap to width
+// aligned under the value column (so SANs stay tidy, no mid-word breaks).
+func certRow(b *strings.Builder, st styles, colorize bool, width int, k, v string) {
+	b.WriteString("  " + paintIf(colorize, st.jsonKey, fmt.Sprintf("%-12s", k)) + " " + wrapValue(v, certValueCol, width) + "\n")
 }
 
 // wrapValue word-wraps a row value to the pane width, indenting continuation
