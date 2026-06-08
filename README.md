@@ -232,7 +232,7 @@ Logging is structured diagnostics, kept off stdout entirely:
 |----------|--------|
 | `WEEB_LOG` | `debug` \| `info` \| `warn` \| `error` \| `off` (default `warn`) |
 | `WEEB_LOG_FORMAT` | `text` \| `json` \| `logfmt` (default `text`) |
-| `WEEB_LOG_FILE` | Log to this path. In TUI mode logs always go to a file (default `$TMPDIR/weeb.log`) so they never corrupt the screen — view them live with `ctrl+g`. |
+| `WEEB_LOG_FILE` | Log to this path. In TUI mode logs always go to a file (default `weeb.log` in the OS temp dir) so they never corrupt the screen — view them live with `ctrl+g`. |
 
 ## The two seams
 
