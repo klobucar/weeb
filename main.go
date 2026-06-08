@@ -671,7 +671,7 @@ LOGGING (structured diagnostics; never on stdout)
   WEEB_LOG         debug|info|warn|error|off        (default: warn)
   WEEB_LOG_FORMAT  text|json|logfmt                 (default: text)
   WEEB_LOG_FILE    path; logs go here instead of stderr. In TUI mode logs always
-                   go to a file (default: $TMPDIR/weeb.log) so they never corrupt
+                   go to a file (default: weeb.log in the OS temp dir) so they don't corrupt
                    the screen; toggle the in-app debug pane with ctrl+g.
 `)
 }
