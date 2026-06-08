@@ -1,0 +1,68 @@
+version: 2
+project_name: weeb
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: weeb
+    main: .
+    binary: weeb
+    env:
+      - CGO_ENABLED=0 # static, no libc dependency
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w # strip symbols/DWARF — smaller binary
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible builds
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: weeb
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+
+release:
+  github:
+    owner: klobucar
+    name: weeb
+  prerelease: auto # vX.Y.Z-rc1 etc. land as pre-releases automatically
+
+# Homebrew tap is intentionally left out for now — add a brews: block once
+# klobucar/homebrew-tap and a HOMEBREW_TAP_TOKEN secret exist.

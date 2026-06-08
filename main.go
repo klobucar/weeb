@@ -13,6 +13,14 @@ import (
 	"github.com/charmbracelet/x/term"
 )
 
+// Build metadata, injected by GoReleaser via -ldflags -X (see .goreleaser.yaml).
+// The defaults apply to a plain `go build` / `go install` outside a release.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	args := os.Args[1:]
 
@@ -23,6 +31,9 @@ func main() {
 	switch args[0] {
 	case "-h", "--help", "help":
 		printHelp(os.Stdout)
+		return
+	case "version", "--version", "-V":
+		printVersion(os.Stdout)
 		return
 	case "cert", "tls":
 		os.Exit(runCert(args[1:]))
@@ -48,6 +59,11 @@ func main() {
 		os.Exit(runCLI(parsed))
 	}
 	os.Exit(runTUI(&parsed)) // interactive — a URL is optional, fields can be filled in
+}
+
+// printVersion writes the build metadata wired in at release time.
+func printVersion(w io.Writer) {
+	fmt.Fprintf(w, "weeb %s (commit %s, built %s)\n", version, commit, date)
 }
 
 // headless reports whether a parsed request should run as a one-shot CLI rather
@@ -571,6 +587,7 @@ USAGE
   weeb [METHOD] URL [opts]   open the TUI prefilled with the request
   weeb cert HOST [opts]      inspect a TLS certificate / chain
   weeb curl '<curl cmd>'     run a pasted curl command (import)
+  weeb version               print the build version
 
   METHOD defaults to GET. A URL opens the interactive builder, BUT weeb runs a
   headless one-shot instead when the output is script-bound — stdout isn't a
