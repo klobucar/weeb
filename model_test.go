@@ -137,6 +137,37 @@ func TestResolveSpecPrefills(t *testing.T) {
 	}
 }
 
+// A header row the user deleted from the TUI form must stay deleted: the form
+// already surfaced the env prefills, so resolveSpec must not re-inject them.
+func TestResolveSpecRespectsResolvedHeaders(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "https://api.example.com")
+	t.Setenv("WEEB_HEADERS", "X-A:1")
+	t.Setenv("WEEB_TOKEN", "tok")
+
+	got := resolveSpec(RequestSpec{Method: "GET", URL: "/me", HeadersResolved: true})
+
+	if len(got.Headers) != 0 {
+		t.Errorf("env headers re-injected after user deleted them: %+v", got.Headers)
+	}
+	if got.URL != "https://api.example.com/me" {
+		t.Errorf("URL resolution must still apply: %q", got.URL)
+	}
+}
+
+func TestSpecFromFormMarksHeadersResolved(t *testing.T) {
+	t.Setenv("WEEB_TOKEN", "tok")
+	m := testModel()
+	// Simulate deleting the prefilled Authorization row.
+	m.headers = []headerRow{newHeaderRow("", "")}
+	spec := m.specFromForm()
+	if !spec.HeadersResolved {
+		t.Fatal("specFromForm must mark headers as resolved")
+	}
+	if got := resolveSpec(spec); len(got.Headers) != 0 {
+		t.Errorf("deleted auth header came back at send time: %+v", got.Headers)
+	}
+}
+
 func TestPrefill(t *testing.T) {
 	m := testModel()
 	m.prefill(cliArgs{

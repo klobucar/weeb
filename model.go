@@ -569,6 +569,9 @@ func (m model) specFromForm() RequestSpec {
 		URL:     strings.TrimSpace(m.url.Value()),
 		Headers: hs,
 		Body:    body,
+		// The form rows started from the env prefills, so they are the user's
+		// final say — a deleted Authorization row must not be re-injected.
+		HeadersResolved: true,
 	}
 }
 
