@@ -100,7 +100,7 @@ func newLogger(mode runMode) (*log.Logger, *safeBuffer, func()) {
 		dbg = &safeBuffer{}
 		path := logFile
 		if path == "" {
-			path = filepath.Join(os.TempDir(), "weeb.log")
+			path = defaultLogPath()
 		}
 		if f, ferr := openLogFile(path); ferr == nil {
 			w = io.MultiWriter(f, dbg)
@@ -120,8 +120,26 @@ func newLogger(mode runMode) (*log.Logger, *safeBuffer, func()) {
 	return logger, dbg, cleanup
 }
 
+// defaultLogPath is the TUI log location: a 0700 dir under the per-user cache
+// dir. The old default — the shared OS temp dir — left request URLs (which can
+// carry tokens in query strings) world-readable on multi-user systems and let
+// another user pre-create /tmp/weeb.log as a symlink for weeb to append
+// through. The temp dir remains only as a last-resort fallback.
+func defaultLogPath() string {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "weeb.log")
+	}
+	dir := filepath.Join(cache, "weeb")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return filepath.Join(os.TempDir(), "weeb.log")
+	}
+	return filepath.Join(dir, "weeb.log")
+}
+
+// openLogFile creates the file private to the user: logged URLs are sensitive.
 func openLogFile(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 }
 
 func parseFormatter(s string) log.Formatter {
