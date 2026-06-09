@@ -441,9 +441,9 @@ func stdoutIsTTY() bool {
 //
 //	weeb [METHOD] URL [-H "K: V"]... [-d DATA] [--timeout DUR]
 //
-// METHOD is optional (defaults to GET). -d DATA may be @file, '-' (stdin), or a
-// literal string. When -d is omitted and stdin is piped, the pipe is read as the
-// body.
+// METHOD is optional (defaults to GET, or POST when a body is present). -d
+// DATA may be @file, '-' (stdin), or a literal string. When -d is omitted and
+// stdin is piped, the pipe is read as the body.
 func parseCLI(args []string) (cliArgs, error) {
 	a := cliArgs{method: "GET"}
 	methodSet := false
@@ -556,6 +556,13 @@ func parseCLI(args []string) (cliArgs, error) {
 		if len(body) > 0 {
 			a.body = body
 		}
+	}
+
+	// A body with no explicit method implies POST, matching curl (and our own
+	// curl importer). The default GET would make buildRequest silently drop
+	// the body the user just piped or passed with -d.
+	if !methodSet && len(a.body) > 0 {
+		a.method = "POST"
 	}
 
 	return a, nil

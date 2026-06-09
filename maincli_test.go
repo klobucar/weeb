@@ -55,6 +55,24 @@ func TestParseCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("body without method implies POST", func(t *testing.T) {
+		// A default GET would silently drop the body in buildRequest.
+		a, err := parseCLI([]string{"https://x", "-d", "a=1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.method != "POST" {
+			t.Errorf("method = %q, want POST", a.method)
+		}
+	})
+
+	t.Run("explicit method wins over body inference", func(t *testing.T) {
+		a, _ := parseCLI([]string{"GET", "https://x", "-d", "a=1"})
+		if a.method != "GET" {
+			t.Errorf("method = %q, want GET (explicitly requested)", a.method)
+		}
+	})
+
 	t.Run("no url is allowed (TUI prefill)", func(t *testing.T) {
 		a, err := parseCLI([]string{"--persona", "tsun"})
 		if err != nil {
