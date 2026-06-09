@@ -113,6 +113,8 @@ func shellSafe(s string) bool {
 // headers, data, basic auth, user-agent/cookie/referer shortcuts — infers the
 // method (POST when there's a body, HEAD for -I), and silently ignores
 // transfer-only flags like -L/-k/--compressed that don't change the request.
+// Flags it does not recognize are an error: an unknown value-taking flag
+// would otherwise leave its value to be mistaken for the URL.
 func parseCurl(argv []string) (RequestSpec, error) {
 	var spec RequestSpec
 	var data []string
@@ -218,14 +220,40 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		// Flags that take a value we don't use — consume and drop it.
 		case "-o", "--output", "-m", "--max-time", "--connect-timeout", "--retry",
 			"-w", "--write-out", "-c", "--cookie-jar", "-T", "--upload-file",
-			"-E", "--cert", "--cacert", "--key", "--proxy", "-x":
+			"-E", "--cert", "--cacert", "--key", "--proxy", "-x",
+			"--max-redirs", "--retry-delay", "--retry-max-time", "--resolve",
+			"--limit-rate", "--connect-to":
 			if _, err := take(&i, flag, attached); err != nil {
 				return spec, err
 			}
 
+		// Boolean transfer-only flags: they shape the transfer, not the request.
+		case "-L", "--location", "--location-trusted", "-k", "--insecure",
+			"--compressed", "-s", "--silent", "-S", "--show-error",
+			"-v", "--verbose", "-f", "--fail", "-i", "--include",
+			"-N", "--no-buffer", "-#", "--progress-bar", "-g", "--globoff",
+			"-4", "--ipv4", "-6", "--ipv6",
+			"--http1.0", "--http1.1", "--http2", "--http3":
+			// ignored
+
 		default:
 			if strings.HasPrefix(arg, "-") && arg != "-" {
-				continue // unknown / boolean transfer flag: ignore
+				// Clustered short bools ("-sSL", "-sIk") are one token; honor
+				// the letters we know. Anything else must error: an unknown
+				// value-taking flag would otherwise leave its value to be
+				// mistaken for the URL.
+				if rest, ok := strings.CutPrefix(arg, "-"); ok && !strings.HasPrefix(arg, "--") && isShortBoolCluster(rest) {
+					for _, r := range rest {
+						switch r {
+						case 'I':
+							headOnly = true
+						case 'G':
+							forceGet = true
+						}
+					}
+					continue
+				}
+				return spec, fmt.Errorf("curl: unsupported flag %q", arg)
 			}
 			if !urlSet {
 				spec.URL, urlSet = arg, true
@@ -252,6 +280,21 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		return spec, fmt.Errorf("curl: no URL found in command")
 	}
 	return spec, nil
+}
+
+// isShortBoolCluster reports whether every letter in a clustered short flag
+// ("sSL" from "-sSL") is a boolean flag we understand: transfer-only ones we
+// ignore plus -I/-G, which set the method.
+func isShortBoolCluster(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !strings.ContainsRune("sSLkvfiIGN46g#", r) {
+			return false
+		}
+	}
+	return true
 }
 
 // tokenizeShell splits a pasted command line into argv the way a POSIX shell
