@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"image/color"
+	"math"
 	"math/big"
 	"net"
 	"net/url"
@@ -332,7 +333,10 @@ func describeCert(c *x509.Certificate) certInfo {
 		Issuer:          c.Issuer.String(),
 		NotBefore:       c.NotBefore,
 		NotAfter:        c.NotAfter,
-		DaysUntilExpiry: int(time.Until(c.NotAfter).Hours() / 24),
+		// Floor, not truncate: a cert expired by less than a day must report a
+		// negative count so certExit's `< 0` check fires (int() rounds -0.5 to
+		// 0, which kept monitors green for up to 24h after expiry).
+		DaysUntilExpiry: int(math.Floor(time.Until(c.NotAfter).Hours() / 24)),
 		DNSNames:        c.DNSNames,
 		Serial:          formatSerial(c.SerialNumber),
 		SHA256:          fingerprintSHA256(c.Raw),
