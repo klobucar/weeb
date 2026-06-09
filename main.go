@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -61,9 +62,25 @@ func main() {
 	os.Exit(runTUI(&parsed)) // interactive — a URL is optional, fields can be filled in
 }
 
-// printVersion writes the build metadata wired in at release time.
+// printVersion writes the build metadata. GoReleaser injects it via -ldflags; for
+// a plain `go build`/`go install` (no ldflags) it falls back to what Go embeds in
+// the binary — the module version for `go install pkg@vX`, or the VCS revision
+// (short) when built from a checkout — so the output is still meaningful.
 func printVersion(w io.Writer) {
-	fmt.Fprintf(w, "weeb %s (commit %s, built %s)\n", version, commit, date)
+	v, c := version, commit
+	if v == "dev" || c == "none" {
+		if info, ok := debug.ReadBuildInfo(); ok {
+			if v == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+				v = info.Main.Version
+			}
+			for _, s := range info.Settings {
+				if s.Key == "vcs.revision" && c == "none" && len(s.Value) >= 10 {
+					c = s.Value[:10]
+				}
+			}
+		}
+	}
+	fmt.Fprintf(w, "weeb %s (commit %s, built %s)\n", v, c, date)
 }
 
 // headless reports whether a parsed request should run as a one-shot CLI rather
