@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -154,6 +155,37 @@ func TestClientDoSendsMethodHeadersBody(t *testing.T) {
 	}
 	if string(gotBody) != "payload" {
 		t.Errorf("server saw body %q, want payload", gotBody)
+	}
+}
+
+// An over-limit body must not be buffered unboundedly: the read is capped,
+// the kept prefix is surfaced, and the truncation is reported as an error.
+func TestClientDoCapsBodySize(t *testing.T) {
+	old := maxBodyBytes
+	maxBodyBytes = 1024
+	t.Cleanup(func() { maxBodyBytes = old })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 4096))
+	}))
+	defer srv.Close()
+
+	res := testClient().Do(RequestSpec{Method: "GET", URL: srv.URL})
+
+	if int64(len(res.Body)) != maxBodyBytes {
+		t.Errorf("body length = %d, want capped at %d", len(res.Body), maxBodyBytes)
+	}
+	if res.Err == nil || res.DisplayErr == "" {
+		t.Error("an over-limit body should surface a read error on both seams")
+	}
+
+	// An exactly-at-limit body passes untouched.
+	exact := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 1024))
+	}))
+	defer exact.Close()
+	if res := testClient().Do(RequestSpec{Method: "GET", URL: exact.URL}); !res.OK() || len(res.Body) != 1024 {
+		t.Errorf("at-limit body should succeed: err=%v len=%d", res.Err, len(res.Body))
 	}
 }
 

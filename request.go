@@ -18,6 +18,12 @@ import (
 
 const defaultTimeout = 30 * time.Second
 
+// maxBodyBytes caps how much of a response body is buffered. Everything weeb
+// does with a body (pretty-print, tree views, TUI render) needs it in memory,
+// so an unbounded read would let a hostile or runaway server stream gigabytes
+// within the timeout window and OOM the process. A var so tests can lower it.
+var maxBodyBytes int64 = 64 << 20 // 64 MiB
+
 // Header is a single request header row.
 type Header struct {
 	Key   string
@@ -168,7 +174,12 @@ func (c *Client) Do(spec RequestSpec) Result {
 	}
 	defer resp.Body.Close()
 
-	body, readErr := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+	if readErr == nil && int64(len(body)) > maxBodyBytes {
+		body = body[:maxBodyBytes]
+		readErr = fmt.Errorf("response body exceeds %d MiB; keeping the first %d MiB",
+			maxBodyBytes>>20, maxBodyBytes>>20)
+	}
 	done := time.Now()
 	dur := done.Sub(start)
 
