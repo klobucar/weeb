@@ -187,11 +187,20 @@ func (m *model) prefill(a cliArgs) {
 	if a.url != "" {
 		m.url.SetValue(a.url)
 	}
-	want := strings.ToUpper(strings.TrimSpace(a.method))
-	for i, mth := range m.methods {
-		if mth == want {
-			m.methodIdx = i
-			break
+	if want := strings.ToUpper(strings.TrimSpace(a.method)); want != "" {
+		found := false
+		for i, mth := range m.methods {
+			if mth == want {
+				m.methodIdx, found = i, true
+				break
+			}
+		}
+		if !found {
+			// A custom -X method (PURGE, LINK, …) joins the selector; it used
+			// to be silently downgraded to GET, sending a different verb than
+			// the user asked for.
+			m.methods = append(m.methods, want)
+			m.methodIdx = len(m.methods) - 1
 		}
 	}
 	if len(a.headers) > 0 {
