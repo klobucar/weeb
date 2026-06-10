@@ -24,7 +24,7 @@ func colorizeJSON(s string, st styles) string {
 		case c == '"':
 			j := i + 1
 			for j < len(s) {
-				if s[j] == '\\' {
+				if s[j] == '\\' && j+1 < len(s) {
 					j += 2
 					continue
 				}
