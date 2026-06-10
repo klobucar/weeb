@@ -39,11 +39,56 @@ func wrapIndent(s string, width int) string {
 		// body in raw view) quadratic — a multi-second freeze per render.
 		out = append(out, ansi.Cut(line, 0, width)) // first row keeps native indent
 		rest := ansi.Cut(line, width, ansi.StringWidth(line))
+		// Cut closes and reopens styles at its boundary, but Hardwrap splits
+		// mid-style without doing either, so every row must be rebalanced:
+		// the viewport renders rows independently, and an unbalanced row
+		// bleeds its color into the pad, the rows below, and the pane border.
+		open := ""
 		for _, seg := range strings.Split(ansi.Hardwrap(rest, contBudget, true), "\n") {
+			carried := open
+			open = sgrStateAfter(open, seg)
+			if carried != "" {
+				seg = carried + seg // reopen what the previous row left active
+			}
+			if open != "" {
+				seg += "\x1b[m" // close before the row ends; reopened next row
+			}
 			out = append(out, pad+seg)
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// sgrStateAfter returns the SGR opening sequence(s) still in effect after row,
+// given the sequence(s) in effect before it: CSI…m sequences accumulate, and a
+// reset (no parameters, 0, or a leading 0) clears everything before it. Other
+// escape sequences are ignored — only SGR spans rows.
+func sgrStateAfter(state, row string) string {
+	for i := 0; ; {
+		j := strings.Index(row[i:], "\x1b[")
+		if j < 0 {
+			return state
+		}
+		i += j + 2
+		k := i
+		for k < len(row) && (row[k] < 0x40 || row[k] > 0x7e) {
+			k++
+		}
+		if k >= len(row) {
+			return state // unterminated; nothing more to track
+		}
+		if row[k] == 'm' {
+			switch params := row[i:k]; {
+			case params == "" || params == "0":
+				state = ""
+			case strings.HasPrefix(params, "0;"):
+				state = "\x1b[" + params[2:] + "m"
+			default:
+				state += row[i-2 : k+1]
+			}
+		}
+		i = k + 1
+	}
 }
 
 // setResp sets the response viewport's content, hang-indent wrapped to its

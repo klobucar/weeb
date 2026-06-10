@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	log "charm.land/log/v2"
@@ -217,6 +218,16 @@ func TestClientDoCapsBodySize(t *testing.T) {
 	}
 	if res.Err == nil || res.DisplayErr == "" {
 		t.Error("an over-limit body should surface a read error on both seams")
+	}
+	// The truncation notice is the only signal the body was cut, so it must
+	// name the real cap — a sub-MiB cap used to be floored to "0 MiB".
+	if res.Err != nil {
+		if strings.Contains(res.Err.Error(), "0 MiB") {
+			t.Errorf("over-cap message floors the cap to zero: %q", res.Err)
+		}
+		if !strings.Contains(res.Err.Error(), "1.0 KB") {
+			t.Errorf("over-cap message should name the 1.0 KB cap, got %q", res.Err)
+		}
 	}
 
 	// An exactly-at-limit body passes untouched.

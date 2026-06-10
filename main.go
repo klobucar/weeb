@@ -652,10 +652,13 @@ func parseCLI(args []string) (cliArgs, error) {
 		}
 	}
 
-	// A body with no explicit method implies POST, matching curl (and our own
-	// curl importer). The default GET would make buildRequest silently drop
-	// the body the user just piped or passed with -d.
-	if !methodSet && len(a.body) > 0 {
+	// A -d body with no explicit method implies POST, matching curl (and our
+	// own curl importer) — the default GET would make buildRequest silently
+	// drop the body the user just asked to send. The inference deliberately
+	// does NOT fire for a body picked up from piped stdin: `some_cmd | weeb
+	// URL` often pipes output that was never meant as a body, and invisibly
+	// flipping GET to POST is worse than dropping the unrequested body.
+	if !methodSet && bodySet && len(a.body) > 0 {
 		a.method = "POST"
 	}
 
