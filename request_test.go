@@ -189,6 +189,35 @@ func TestClientDoCapsBodySize(t *testing.T) {
 	}
 }
 
+// A BodySink streams the body uncapped — maxBodyBytes protects only buffered
+// bodies weeb has to hold in memory to render.
+func TestClientDoStreamsToSinkUncapped(t *testing.T) {
+	old := maxBodyBytes
+	maxBodyBytes = 1024
+	t.Cleanup(func() { maxBodyBytes = old })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 4096))
+	}))
+	defer srv.Close()
+
+	var sink bytes.Buffer
+	res := testClient().Do(RequestSpec{Method: "GET", URL: srv.URL, BodySink: &sink})
+
+	if !res.OK() {
+		t.Fatalf("streamed request failed: %v", res.Err)
+	}
+	if sink.Len() != 4096 {
+		t.Errorf("sink got %d bytes, want all 4096 (cap must not apply)", sink.Len())
+	}
+	if len(res.Body) != 0 {
+		t.Errorf("streamed body should not also be buffered, got %d bytes", len(res.Body))
+	}
+	if res.BodySize != 4096 {
+		t.Errorf("BodySize = %d, want 4096", res.BodySize)
+	}
+}
+
 func TestClientDoTransportError(t *testing.T) {
 	// 127.0.0.1:1 refuses fast — no network round-trip, no hang.
 	res := testClient().Do(RequestSpec{Method: "GET", URL: "http://127.0.0.1:1"})

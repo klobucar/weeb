@@ -190,6 +190,14 @@ func runCLI(a cliArgs) int {
 		client.http.Timeout = a.timeout
 	}
 
+	// A pipe always gets the raw bytes, so stream them as they arrive instead
+	// of buffering: constant memory for arbitrarily large downloads (the
+	// 64 MiB cap applies only to bodies weeb must hold to render), and the
+	// first bytes hit the pipe immediately, like curl.
+	if !stdoutIsTTY() {
+		spec.BodySink = os.Stdout
+	}
+
 	res := client.Do(spec)
 	return emitResult(res, a.stats, a.quiet, a.prettyOn())
 }
@@ -222,6 +230,9 @@ func runCurlImport(args []string) int {
 	logger, _, cleanup := newLogger(modeCLI)
 	defer cleanup()
 	client := newClient(logger, newErrorChan())
+	if !stdoutIsTTY() {
+		spec.BodySink = os.Stdout // piped: stream the raw bytes, uncapped
+	}
 	res := client.Do(spec)
 	return emitResult(res, false, false, envBool("WEEB_PRETTY", true))
 }
@@ -242,6 +253,8 @@ func emitResult(res Result, wantStats, quiet, pretty bool) int {
 		fmt.Fprintln(os.Stderr, renderTiming(res.Timing, st, 50))
 	}
 
+	// A streamed body (BodySink) was already written by Do and leaves
+	// res.Body empty, so this block only fires for buffered responses.
 	if len(res.Body) > 0 {
 		if color {
 			// width 0 -> renderBody uses a sane default for markdown wrapping.
