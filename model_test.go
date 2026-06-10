@@ -316,6 +316,42 @@ func TestCertMsgRendering(t *testing.T) {
 	}
 }
 
+// Fold-pane keys must re-render through setResp so long lines keep their
+// hang-indent wrap; they used to call SetContent directly, clipping the tail
+// of every long line (SoftWrap is off) until another path re-rendered.
+func TestFoldKeysKeepWrapping(t *testing.T) {
+	long := strings.Repeat("x", 200) + "ENDMARK"
+	var m tea.Model = testModel()
+	m = send(t, m, tea.WindowSizeMsg{Width: 80, Height: 40})
+	m = send(t, m, resultMsg(Result{
+		Status: 200, StatusText: "OK", Proto: "HTTP/1.1",
+		Headers:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:        []byte(`{"a":"` + long + `"}`),
+		ContentType: "application/json",
+	}))
+
+	if out := m.View().Content; !strings.Contains(out, "ENDMARK") {
+		t.Fatal("precondition: wrapped long value should show its tail")
+	}
+
+	mm := focusResponse(m.(model))
+	// "-" folds everything (tail legitimately hidden), "+" restores it; every
+	// other key must leave the wrapped tail visible.
+	for _, step := range []struct {
+		key  string
+		want bool
+	}{
+		{"right", true}, {"left", true}, {"enter", true}, {"enter", true},
+		{"-", false}, {"+", true},
+	} {
+		m = send(t, tea.Model(mm), kp(step.key))
+		mm = m.(model)
+		if got := strings.Contains(mm.View().Content, "ENDMARK"); got != step.want {
+			t.Fatalf("after %q: tail visible = %v, want %v (render skipped wrapIndent?)", step.key, got, step.want)
+		}
+	}
+}
+
 var errTest = fmt.Errorf("dial tcp: connection refused")
 
 // focusResponse moves focus to the response pane so fold keys are live.
