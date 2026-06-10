@@ -89,6 +89,32 @@ func TestParseCurlAuthAndIgnoredFlags(t *testing.T) {
 	}
 }
 
+// An unrecognized flag must error rather than be skipped: skipping an unknown
+// value-taking flag used to leave its value to be mistaken for the URL
+// (`--max-redirs 5 https://x` requested http://5 and dropped the real URL).
+func TestParseCurlUnknownFlag(t *testing.T) {
+	// Known value-taking flag: value consumed, URL survives.
+	s, err := parseCurl([]string{"curl", "--max-redirs", "5", "https://x"})
+	if err != nil || s.URL != "https://x" {
+		t.Errorf("--max-redirs: url = %q, err = %v, want https://x", s.URL, err)
+	}
+	// Unknown flags error instead of eating the URL.
+	for _, argv := range [][]string{
+		{"curl", "-F", "file=@x.png", "https://x"},
+		{"curl", "--doesnotexist", "https://x"},
+		{"curl", "-sSLZ", "https://x"}, // cluster with an unknown letter
+	} {
+		if _, err := parseCurl(argv); err == nil {
+			t.Errorf("parseCurl(%v) should error on the unknown flag", argv)
+		}
+	}
+	// Clustered known bools still work, including method-setting -I.
+	s, err = parseCurl([]string{"curl", "-sIk", "https://x"})
+	if err != nil || s.Method != "HEAD" || s.URL != "https://x" {
+		t.Errorf("-sIk: method = %q, url = %q, err = %v; want HEAD https://x", s.Method, s.URL, err)
+	}
+}
+
 func TestParseCurlMultipleData(t *testing.T) {
 	s, _ := parseCurl([]string{"curl", "https://x", "-d", "a=1", "-d", "b=2"})
 	if string(s.Body) != "a=1&b=2" {
