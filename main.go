@@ -522,8 +522,8 @@ func stdoutIsTTY() bool {
 //	weeb [METHOD] URL [-H "K: V"]... [-d DATA] [--timeout DUR]
 //
 // METHOD is optional (defaults to GET, or POST when a body is present). -d
-// DATA may be @file, '-' (stdin), or a literal string. When -d is omitted and
-// stdin is piped, the pipe is read as the body.
+// DATA may be @file, '-' or '@-' (stdin), or a literal string. When -d is
+// omitted and stdin is piped, the pipe is read as the body.
 func parseCLI(args []string) (cliArgs, error) {
 	a := cliArgs{method: "GET"}
 	methodSet := false
@@ -673,11 +673,11 @@ func nextArg(args []string, i *int, flag string) (string, error) {
 	return args[*i], nil
 }
 
-// readData resolves a -d value: @file reads a file, '-' reads stdin, anything
-// else is a literal.
+// readData resolves a -d value: @file reads a file, '-' or '@-' reads stdin,
+// anything else is a literal.
 func readData(val string) ([]byte, error) {
 	switch {
-	case val == "-":
+	case val == "-", val == "@-":
 		return io.ReadAll(os.Stdin)
 	case strings.HasPrefix(val, "@"):
 		b, err := os.ReadFile(val[1:])
@@ -720,7 +720,7 @@ OPTIONS
   -H, --header "K: V"   add a request header (repeatable)
   -d, --data DATA       request body; DATA may be:
                           @file   read the file
-                          -       read stdin
+                          -, @-   read stdin
                           string  a literal body
                         (if -d is omitted and stdin is piped, the pipe is the body)
   -X, --request METHOD  set the method explicitly
