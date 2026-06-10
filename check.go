@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,9 +15,10 @@ import (
 // Monitoring-plugin mode (--check). The output contract is the Nagios plugin
 // API, which Icinga, Sensu, Zabbix agents and friends all consume: exactly one
 // line on stdout — "SERVICE STATUS - message|perfdata" — and the verdict in
-// the exit code. weeb's normal output matrix (body to stdout, stats to stderr,
-// 0/1/2 exits) is suspended entirely in this mode; the line and the code ARE
-// the result.
+// the exit code. With --json the same verdict renders as one JSON object
+// (script_exporter-style consumers) under the same exit-code contract. weeb's
+// normal output matrix (body to stdout, stats to stderr, 0/1/2 exits) is
+// suspended entirely in this mode; the line and the code ARE the result.
 
 // Plugin exit codes. These deliberately do not match weeb's normal CLI codes
 // (where 2 means "bad usage"): in plugin-land 2 is CRITICAL and usage errors
@@ -26,6 +29,53 @@ const (
 	checkCritical = 2
 	checkUnknown  = 3
 )
+
+var checkStatusNames = [...]string{"OK", "WARNING", "CRITICAL", "UNKNOWN"}
+
+// checkVerdict is one evaluated check: severity, the human message, and the
+// measurements behind it. It renders as the classic plugin line or — with
+// --json — as a JSON object carrying the same fields plus typed metrics.
+type checkVerdict struct {
+	Check   string         `json:"check"`  // "cert" or "http"
+	Status  string         `json:"status"` // OK | WARNING | CRITICAL | UNKNOWN
+	Code    int            `json:"code"`   // 0..3; also the process exit code
+	Message string         `json:"message"`
+	Metrics map[string]any `json:"metrics,omitempty"`
+
+	perf string // plugin perfdata (sans '|'); JSON consumers get Metrics instead
+}
+
+func newCheckVerdict(check string, code int, msg, perf string, metrics map[string]any) checkVerdict {
+	return checkVerdict{
+		Check: check, Status: checkStatusNames[code], Code: code,
+		Message: msg, Metrics: metrics, perf: perf,
+	}
+}
+
+// line renders the one-line plugin format: "CERT OK - message|perfdata".
+func (v checkVerdict) line() string {
+	s := strings.ToUpper(v.Check) + " " + v.Status + " - " + v.Message
+	if v.perf != "" {
+		s += "|" + v.perf
+	}
+	return s
+}
+
+// json renders the same verdict as a single-line JSON object.
+func (v checkVerdict) json() string {
+	b, _ := json.Marshal(v) // the struct holds only marshalable fields
+	return string(b)
+}
+
+// printCheck emits a verdict in the chosen rendering and returns its exit code.
+func printCheck(w io.Writer, v checkVerdict, asJSON bool) int {
+	if asJSON {
+		fmt.Fprintln(w, v.json())
+	} else {
+		fmt.Fprintln(w, v.line())
+	}
+	return v.Code
+}
 
 // checkSafe flattens peer-controlled text (cert CNs, verify/transport error
 // strings) for embedding in the one-line plugin format: ANSI escapes are
@@ -49,33 +99,36 @@ func checkSafe(s string) string {
 // expiry thresholds (intermediates routinely outlive it; if one doesn't, the
 // chain fails verification and that path fires instead). Trust is CRITICAL
 // unless -k skipped the check, mirroring the normal exit-code rule.
-func checkCert(rep *certReport, warnDays, critDays int) (string, int) {
-	target := rep.Host + ":" + rep.Port
+func checkCert(rep *certReport, warnDays, critDays int) checkVerdict {
+	target := checkSafe(rep.Host + ":" + rep.Port)
 	if len(rep.Chain) == 0 {
-		return "CERT UNKNOWN - " + checkSafe(target) + " presented no certificates", checkUnknown
+		return newCheckVerdict("cert", checkUnknown, target+" presented no certificates", "", nil)
 	}
 	leaf := rep.Chain[0]
 	days := leaf.DaysUntilExpiry
 	until := leaf.NotAfter.Format("2006-01-02")
-	perf := fmt.Sprintf("|days=%d;%d;%d", days, warnDays, critDays)
+	perf := fmt.Sprintf("days=%d;%d;%d", days, warnDays, critDays)
+	metrics := map[string]any{
+		"days_until_expiry": days,
+		"warn_days":         warnDays,
+		"crit_days":         critDays,
+	}
 
-	if !rep.Verified && !rep.Skipped {
-		return fmt.Sprintf("CERT CRITICAL - %s untrusted: %s%s",
-			checkSafe(target), checkSafe(rep.VerifyErr), perf), checkCritical
-	}
+	code := checkOK
+	msg := fmt.Sprintf("%s expires in %d days (%s)", target, days, until)
 	switch {
+	case !rep.Verified && !rep.Skipped:
+		code = checkCritical
+		msg = fmt.Sprintf("%s untrusted: %s", target, checkSafe(rep.VerifyErr))
 	case days < 0:
-		return fmt.Sprintf("CERT CRITICAL - %s expired %d days ago (%s)%s",
-			checkSafe(target), -days, until, perf), checkCritical
+		code = checkCritical
+		msg = fmt.Sprintf("%s expired %d days ago (%s)", target, -days, until)
 	case days <= critDays:
-		return fmt.Sprintf("CERT CRITICAL - %s expires in %d days (%s)%s",
-			checkSafe(target), days, until, perf), checkCritical
+		code = checkCritical
 	case days <= warnDays:
-		return fmt.Sprintf("CERT WARNING - %s expires in %d days (%s)%s",
-			checkSafe(target), days, until, perf), checkWarning
+		code = checkWarning
 	}
-	return fmt.Sprintf("CERT OK - %s expires in %d days (%s)%s",
-		checkSafe(target), days, until, perf), checkOK
+	return newCheckVerdict("cert", code, msg, perf, metrics)
 }
 
 // ---- weeb URL --check -------------------------------------------------------
@@ -166,16 +219,20 @@ func parseExpectStatus(spec string) (func(int) bool, error) {
 // checkHTTP turns a finished request into a plugin verdict. Severity order:
 // no response at all is CRITICAL, then the status assertion, an incomplete
 // body, the body pattern, and finally the response-time thresholds.
-func checkHTTP(res Result, o checkHTTPOpts) (string, int) {
+func checkHTTP(res Result, o checkHTTPOpts) checkVerdict {
 	if res.Status == 0 { // never got a response
 		msg := "no response"
 		if res.Err != nil {
 			msg = res.Err.Error()
 		}
-		return "HTTP CRITICAL - " + checkSafe(msg), checkCritical
+		return newCheckVerdict("http", checkCritical, checkSafe(msg), "", nil)
 	}
 
 	perf := checkHTTPPerf(res, o)
+	metrics := checkHTTPMetrics(res, o)
+	verdict := func(code int, msg string) checkVerdict {
+		return newCheckVerdict("http", code, msg, perf, metrics)
+	}
 	statusTxt := fmt.Sprintf("%d %s", res.Status, res.StatusText)
 	ms := res.Timing.Total.Milliseconds()
 
@@ -184,31 +241,26 @@ func checkHTTP(res Result, o checkHTTPOpts) (string, int) {
 		ok, want = o.expect(res.Status), o.expectSpec
 	}
 	if !ok {
-		return fmt.Sprintf("HTTP CRITICAL - %s (expected %s) in %d ms%s",
-			statusTxt, want, ms, perf), checkCritical
+		return verdict(checkCritical, fmt.Sprintf("%s (expected %s) in %d ms", statusTxt, want, ms))
 	}
 	// A passing status with res.Err set means the body read failed or was
 	// truncated at the cap — the data below would lie, so say that instead.
 	// (A non-passing status already reported above; its Err is the status
 	// error itself.)
 	if res.Err != nil && res.Status < 400 {
-		return fmt.Sprintf("HTTP CRITICAL - %s but body incomplete: %s%s",
-			statusTxt, checkSafe(res.Err.Error()), perf), checkCritical
+		return verdict(checkCritical, fmt.Sprintf("%s but body incomplete: %s", statusTxt, checkSafe(res.Err.Error())))
 	}
 	if o.bodyRe != nil && !o.bodyRe.Match(res.Body) {
-		return fmt.Sprintf("HTTP CRITICAL - body does not match %q (%s, %d bytes)%s",
-			o.bodyRe.String(), statusTxt, res.bodySize(), perf), checkCritical
+		return verdict(checkCritical, fmt.Sprintf("body does not match %q (%s, %d bytes)",
+			o.bodyRe.String(), statusTxt, res.bodySize()))
 	}
 	if o.crit > 0 && res.Timing.Total > o.crit {
-		return fmt.Sprintf("HTTP CRITICAL - %s in %d ms (crit at %s)%s",
-			statusTxt, ms, o.crit, perf), checkCritical
+		return verdict(checkCritical, fmt.Sprintf("%s in %d ms (crit at %s)", statusTxt, ms, o.crit))
 	}
 	if o.warn > 0 && res.Timing.Total > o.warn {
-		return fmt.Sprintf("HTTP WARNING - %s in %d ms (warn at %s)%s",
-			statusTxt, ms, o.warn, perf), checkWarning
+		return verdict(checkWarning, fmt.Sprintf("%s in %d ms (warn at %s)", statusTxt, ms, o.warn))
 	}
-	return fmt.Sprintf("HTTP OK - %s in %d ms, %d bytes%s",
-		statusTxt, ms, res.bodySize(), perf), checkOK
+	return verdict(checkOK, fmt.Sprintf("%s in %d ms, %d bytes", statusTxt, ms, res.bodySize()))
 }
 
 // checkHTTPPerf renders the perfdata section: response time against its
@@ -216,12 +268,31 @@ func checkHTTP(res Result, o checkHTTPOpts) (string, int) {
 // to expiry, so one HTTP check can also feed cert-expiry graphs/alerts.
 func checkHTTPPerf(res Result, o checkHTTPOpts) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "|time=%.3fs;%s;%s", res.Timing.Total.Seconds(), perfSeconds(o.warn), perfSeconds(o.crit))
+	fmt.Fprintf(&b, "time=%.3fs;%s;%s", res.Timing.Total.Seconds(), perfSeconds(o.warn), perfSeconds(o.crit))
 	fmt.Fprintf(&b, " size=%dB", res.bodySize())
 	if res.TLS != nil && res.TLS.Leaf != nil {
 		fmt.Fprintf(&b, " days_until_expiry=%d", res.TLS.Leaf.DaysUntilExpiry)
 	}
 	return b.String()
+}
+
+// checkHTTPMetrics is the perfdata's typed twin for the --json rendering.
+func checkHTTPMetrics(res Result, o checkHTTPOpts) map[string]any {
+	m := map[string]any{
+		"http_status": res.Status,
+		"time_ms":     res.Timing.Total.Milliseconds(),
+		"size_bytes":  res.bodySize(),
+	}
+	if o.warn > 0 {
+		m["warn_ms"] = o.warn.Milliseconds()
+	}
+	if o.crit > 0 {
+		m["crit_ms"] = o.crit.Milliseconds()
+	}
+	if res.TLS != nil && res.TLS.Leaf != nil {
+		m["days_until_expiry"] = res.TLS.Leaf.DaysUntilExpiry
+	}
+	return m
 }
 
 // perfSeconds renders a threshold for a perfdata field, empty when unset (the

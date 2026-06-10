@@ -177,6 +177,7 @@ type cliArgs struct {
 	// Monitoring-plugin mode (see check.go). check replaces the whole output
 	// matrix with one plugin line + a 0/1/2/3 exit; the others only apply with it.
 	check        bool
+	checkJSON    bool          // --json: render the verdict as a JSON object
 	expectStatus string        // --expect-status: statuses that count as OK
 	expectBody   string        // --expect-body: Go regexp the body must match
 	warn, crit   time.Duration // -w/-c: response-time thresholds
@@ -232,12 +233,11 @@ func runCLI(a cliArgs) int {
 	if a.check {
 		o, err := a.checkOpts()
 		if err != nil {
-			fmt.Fprintln(outW, "HTTP UNKNOWN - "+checkSafe(err.Error()))
-			return checkUnknown
+			return printCheck(outW, newCheckVerdict("http", checkUnknown, checkSafe(err.Error()), "", nil), a.checkJSON)
 		}
 		nopts = o
-	} else if a.expectStatus != "" || a.expectBody != "" || a.warn > 0 || a.crit > 0 {
-		fmt.Fprintln(os.Stderr, "weeb: --expect-status/--expect-body/-w/-c only apply with --check")
+	} else if a.expectStatus != "" || a.expectBody != "" || a.warn > 0 || a.crit > 0 || a.checkJSON {
+		fmt.Fprintln(os.Stderr, "weeb: --expect-status/--expect-body/-w/-c/--json only apply with --check")
 		return 2
 	}
 
@@ -270,9 +270,7 @@ func runCLI(a cliArgs) int {
 
 	res := client.Do(spec)
 	if a.check {
-		line, code := checkHTTP(res, nopts)
-		fmt.Fprintln(outW, line)
-		return code
+		return printCheck(outW, checkHTTP(res, nopts), a.checkJSON)
 	}
 	code := emitResult(res, a.stats, a.quiet, a.prettyOn())
 	if outFile != nil {
@@ -501,8 +499,8 @@ func runCert(args []string) int {
 	if checkMode && critDays > warnDays {
 		// A usage error in plugin mode is UNKNOWN on stdout, not stderr/2 —
 		// the monitoring system is the one reading.
-		fmt.Fprintf(outW, "CERT UNKNOWN - --crit %d days is above --warn %d days\n", critDays, warnDays)
-		return checkUnknown
+		msg := fmt.Sprintf("--crit %d days is above --warn %d days", critDays, warnDays)
+		return printCheck(outW, newCheckVerdict("cert", checkUnknown, msg, "", nil), asJSON)
 	}
 	opts.insecure = insecure
 
@@ -535,8 +533,7 @@ func runCert(args []string) int {
 		if checkMode {
 			// Could not reach the endpoint at all: that's UNKNOWN, not
 			// CRITICAL — the cert state was never observed.
-			fmt.Fprintln(outW, "CERT UNKNOWN - "+checkSafe(err.Error()))
-			return checkUnknown
+			return printCheck(outW, newCheckVerdict("cert", checkUnknown, checkSafe(err.Error()), "", nil), asJSON)
 		}
 		fmt.Fprintln(errW, voice.Render(KindTransport, 0, err))
 		return 1
@@ -545,9 +542,9 @@ func runCert(args []string) int {
 		"version", rep.TLSVersion, "verified", rep.Verified, "chain", len(rep.Chain))
 
 	if checkMode {
-		line, code := checkCert(rep, warnDays, critDays)
-		fmt.Fprintln(outW, line)
-		return code
+		// --json here means the verdict object, not the full report — the
+		// check decides, so the check is what gets serialized.
+		return printCheck(outW, checkCert(rep, warnDays, critDays), asJSON)
 	}
 	if asPEM {
 		fmt.Fprint(outW, certPEM(rep))
@@ -687,6 +684,9 @@ func parseCLI(args []string) (cliArgs, error) {
 
 		case arg == "--check" || arg == "--nagios":
 			a.check = true
+
+		case arg == "--json":
+			a.checkJSON = true
 
 		case arg == "--expect-status":
 			val, err := nextArg(args, &i, arg)
@@ -853,6 +853,9 @@ MONITORING (--check; a check_http replacement)
       --expect-body RE  CRITICAL unless the body matches this Go regexp
   -w, --warn DUR        WARNING when the request takes longer, e.g. 500ms
   -c, --crit DUR        CRITICAL when the request takes longer, e.g. 2s
+      --json            render the verdict as one JSON object instead of the
+                        plugin line — {check, status, code, message, metrics}
+                        — same exit code (for script_exporter & friends)
 
 CURL IMPORT (weeb curl '<command>')
   Paste a curl command (from docs, DevTools "Copy as cURL", etc.) and weeb runs
@@ -863,7 +866,9 @@ CURL IMPORT (weeb curl '<command>')
 
 CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   -k, --insecure        inspect even if the chain is untrusted/expired
-      --json            emit the report as JSON (clean, for pipes/monitoring)
+      --json            emit the report as JSON (clean, for pipes/monitoring);
+                        with --check, the evaluated VERDICT object instead
+                        ({check, status, code, message, metrics})
       --pem             dump the chain as PEM (like -showcerts); --showcerts alias
       --brief           show the leaf only, not full detail for every cert (--short)
       --sni NAME        present this SNI/servername (decoupled from the dial host,

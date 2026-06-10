@@ -226,6 +226,24 @@ regexp; no match is CRITICAL. The HTTP perfdata always includes the leaf
 cert's `days_until_expiry` on TLS connections, so one check can feed both
 latency and expiry alerting.
 
+Prefer structured output? Add `--json` and the same verdict (same exit code)
+comes back as one JSON object instead of the plugin line:
+
+```sh
+weeb https://api.example.com/health --check --json -w 500ms | jq .
+# {
+#   "check": "http", "status": "OK", "code": 0,
+#   "message": "200 OK in 123 ms, 512 bytes",
+#   "metrics": { "http_status": 200, "time_ms": 123, "size_bytes": 512,
+#                "warn_ms": 500, "days_until_expiry": 87 }
+# }
+```
+
+Note the distinction on the cert side: plain `weeb cert HOST --json` emits the
+full *report* (chain, SANs, fingerprints — no verdict), while
+`weeb cert HOST --check --json` emits the evaluated *verdict* against your
+thresholds. The report is for inspection; the verdict is for alerting.
+
 No Prometheus exporter is planned — that's a daemon, and
 [blackbox_exporter](https://github.com/prometheus/blackbox_exporter) already
 is one. If you want these numbers in Prometheus anyway, `weeb cert --json`

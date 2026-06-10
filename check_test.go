@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,9 +91,10 @@ func TestCheckCert(t *testing.T) {
 		{"empty chain", &certReport{Host: "h", Port: "443"}, checkUnknown, "presented no certificates"},
 	}
 	for _, c := range cases {
-		line, code := checkCert(c.rep, 30, 14)
-		if code != c.wantCode {
-			t.Errorf("%s: code = %d, want %d (line %q)", c.name, code, c.wantCode, line)
+		v := checkCert(c.rep, 30, 14)
+		line := v.line()
+		if v.Code != c.wantCode {
+			t.Errorf("%s: code = %d, want %d (line %q)", c.name, v.Code, c.wantCode, line)
 		}
 		if !strings.Contains(line, c.wantSub) {
 			t.Errorf("%s: line %q should contain %q", c.name, line, c.wantSub)
@@ -103,14 +105,80 @@ func TestCheckCert(t *testing.T) {
 	}
 
 	// Perfdata carries the days and both thresholds.
-	if line, _ := checkCert(rep(87, true, false), 30, 14); !strings.HasSuffix(line, "|days=87;30;14") {
+	if line := checkCert(rep(87, true, false), 30, 14).line(); !strings.HasSuffix(line, "|days=87;30;14") {
 		t.Errorf("perfdata missing or wrong: %q", line)
 	}
 	// A hostile CN/verify error can't smuggle escapes or break the line format.
 	bad := rep(87, false, false)
 	bad.VerifyErr = "x509: \x1b]52;c;x\x07evil\nline|pipe"
-	if line, _ := checkCert(bad, 30, 14); strings.ContainsAny(line, "\x1b\n") {
+	if line := checkCert(bad, 30, 14).line(); strings.ContainsAny(line, "\x1b\n") {
 		t.Errorf("hostile verify error leaked control bytes: %q", line)
+	}
+}
+
+// The --json rendering carries the same verdict as the plugin line, as one
+// JSON object with typed metrics, so script_exporter-style consumers don't
+// have to parse perfdata.
+func TestCheckVerdictJSON(t *testing.T) {
+	rep := &certReport{
+		Host: "example.com", Port: "443", Verified: true,
+		Chain: []certInfo{{
+			DaysUntilExpiry: 21,
+			NotAfter:        time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		}},
+	}
+	out := checkCert(rep, 30, 14).json()
+	if strings.Contains(out, "\n") {
+		t.Errorf("JSON verdict must be one line: %q", out)
+	}
+	var v struct {
+		Check   string         `json:"check"`
+		Status  string         `json:"status"`
+		Code    int            `json:"code"`
+		Message string         `json:"message"`
+		Metrics map[string]any `json:"metrics"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("unmarshal %q: %v", out, err)
+	}
+	if v.Check != "cert" || v.Status != "WARNING" || v.Code != 1 {
+		t.Errorf("verdict = %+v", v)
+	}
+	if !strings.Contains(v.Message, "expires in 21 days") {
+		t.Errorf("message = %q", v.Message)
+	}
+	if v.Metrics["days_until_expiry"] != float64(21) || v.Metrics["warn_days"] != float64(30) {
+		t.Errorf("metrics = %v", v.Metrics)
+	}
+
+	// HTTP side: status/time/size plus TLS leaf days.
+	hres := Result{
+		Status: 200, StatusText: "OK", Body: []byte("hello"),
+		Timing: Timing{Total: 123 * time.Millisecond},
+		TLS:    &connTLS{Leaf: &certInfo{DaysUntilExpiry: 87}},
+	}
+	hout := checkHTTP(hres, checkHTTPOpts{warn: 500 * time.Millisecond}).json()
+	var hv struct {
+		Check   string         `json:"check"`
+		Status  string         `json:"status"`
+		Metrics map[string]any `json:"metrics"`
+	}
+	if err := json.Unmarshal([]byte(hout), &hv); err != nil {
+		t.Fatalf("unmarshal %q: %v", hout, err)
+	}
+	if hv.Check != "http" || hv.Status != "OK" {
+		t.Errorf("verdict = %+v", hv)
+	}
+	for k, want := range map[string]float64{
+		"http_status": 200, "time_ms": 123, "size_bytes": 5,
+		"warn_ms": 500, "days_until_expiry": 87,
+	} {
+		if hv.Metrics[k] != want {
+			t.Errorf("metrics[%s] = %v, want %v", k, hv.Metrics[k], want)
+		}
+	}
+	if _, ok := hv.Metrics["crit_ms"]; ok {
+		t.Error("unset crit threshold should be omitted from metrics")
 	}
 }
 
@@ -158,9 +226,10 @@ func TestCheckHTTP(t *testing.T) {
 			checkCritical, "HTTP CRITICAL - dial tcp: connection refused"},
 	}
 	for _, c := range cases {
-		line, code := checkHTTP(c.res, c.opts)
-		if code != c.wantCode {
-			t.Errorf("%s: code = %d, want %d (line %q)", c.name, code, c.wantCode, line)
+		v := checkHTTP(c.res, c.opts)
+		line := v.line()
+		if v.Code != c.wantCode {
+			t.Errorf("%s: code = %d, want %d (line %q)", c.name, v.Code, c.wantCode, line)
 		}
 		if !strings.Contains(line, c.wantSub) {
 			t.Errorf("%s: line %q should contain %q", c.name, line, c.wantSub)
@@ -171,14 +240,14 @@ func TestCheckHTTP(t *testing.T) {
 	// the assertions ran against real data.
 	trunc := res(200, "partial", time.Millisecond)
 	trunc.Err = errTest
-	if line, code := checkHTTP(trunc, checkHTTPOpts{}); code != checkCritical || !strings.Contains(line, "body incomplete") {
-		t.Errorf("incomplete body: got %d %q", code, line)
+	if v := checkHTTP(trunc, checkHTTPOpts{}); v.Code != checkCritical || !strings.Contains(v.line(), "body incomplete") {
+		t.Errorf("incomplete body: got %d %q", v.Code, v.line())
 	}
 
 	// Perfdata: time with thresholds, size, and TLS leaf days when present.
 	tlsRes := res(200, "hello", 123*time.Millisecond)
 	tlsRes.TLS = &connTLS{Leaf: &certInfo{DaysUntilExpiry: 87}}
-	line, _ := checkHTTP(tlsRes, checkHTTPOpts{warn: 500 * time.Millisecond, crit: 2 * time.Second})
+	line := checkHTTP(tlsRes, checkHTTPOpts{warn: 500 * time.Millisecond, crit: 2 * time.Second}).line()
 	if !strings.Contains(line, "|time=0.123s;0.500;2.000 size=5B days_until_expiry=87") {
 		t.Errorf("perfdata wrong: %q", line)
 	}
@@ -259,6 +328,43 @@ func TestRunCLICheck(t *testing.T) {
 	if !strings.HasPrefix(buf2.String(), "HTTP UNKNOWN - ") {
 		t.Errorf("bad pattern output = %q", buf2.String())
 	}
+
+	// --json: the same verdict as one JSON object, same exit code.
+	buf3 := swapOutW(t)
+	if code := runCLI(cliArgs{method: "GET", url: srv.URL, check: true, checkJSON: true}); code != checkOK {
+		t.Fatalf("json exit = %d, want 0 (output %q)", code, buf3.String())
+	}
+	var v struct {
+		Check   string         `json:"check"`
+		Status  string         `json:"status"`
+		Metrics map[string]any `json:"metrics"`
+	}
+	if err := json.Unmarshal([]byte(buf3.String()), &v); err != nil {
+		t.Fatalf("output is not JSON: %q (%v)", buf3.String(), err)
+	}
+	if v.Check != "http" || v.Status != "OK" || v.Metrics["http_status"] != float64(200) {
+		t.Errorf("json verdict = %+v", v)
+	}
+}
+
+// `weeb cert --check --json` renders even usage errors as a JSON UNKNOWN
+// verdict (here: thresholds the wrong way round — no dial happens).
+func TestRunCertCheckJSONUnknown(t *testing.T) {
+	buf := swapOutW(t)
+	if code := runCert([]string{"localhost:1", "--check", "--json", "-w", "5", "-c", "30"}); code != checkUnknown {
+		t.Fatalf("exit = %d, want 3 (output %q)", code, buf.String())
+	}
+	var v struct {
+		Check  string `json:"check"`
+		Status string `json:"status"`
+		Code   int    `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(buf.String()), &v); err != nil {
+		t.Fatalf("output is not JSON: %q (%v)", buf.String(), err)
+	}
+	if v.Check != "cert" || v.Status != "UNKNOWN" || v.Code != 3 {
+		t.Errorf("json verdict = %+v", v)
+	}
 }
 
 // The assertion flags are meaningless without --check and must error loudly
@@ -266,6 +372,9 @@ func TestRunCLICheck(t *testing.T) {
 func TestExpectFlagsRequireCheck(t *testing.T) {
 	if code := runCLI(cliArgs{method: "GET", url: "http://x", expectBody: "ok"}); code != 2 {
 		t.Errorf("exit = %d, want 2", code)
+	}
+	if code := runCLI(cliArgs{method: "GET", url: "http://x", checkJSON: true}); code != 2 {
+		t.Errorf("--json without --check: exit = %d, want 2", code)
 	}
 }
 
