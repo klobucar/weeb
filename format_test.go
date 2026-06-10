@@ -136,3 +136,28 @@ func TestRenderBodyRawVsPretty(t *testing.T) {
 		t.Errorf("pretty JSON should be multi-line, got %q", pretty)
 	}
 }
+
+func TestSanitizeTTY(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"plain text untouched", "hello\nworld\ttab", "hello\nworld\ttab"},
+		{"SGR color kept", "\x1b[31mred\x1b[0m", "\x1b[31mred\x1b[0m"},
+		{"OSC 52 clipboard dropped", "\x1b]52;c;ZXZpbA==\x07stolen", "stolen"},
+		{"OSC title dropped (BEL)", "\x1b]0;evil title\x07text", "text"},
+		{"OSC title dropped (ST)", "\x1b]2;evil\x1b\\text", "text"},
+		{"OSC 8 hyperlink kept", "\x1b]8;;https://x\x07link\x1b]8;;\x07", "\x1b]8;;https://x\x07link\x1b]8;;\x07"},
+		{"cursor/clear CSI dropped", "\x1b[2J\x1b[Hspoof", "spoof"},
+		{"scroll region dropped", "\x1b[1;10rtext", "text"},
+		{"DCS payload dropped", "\x1bPq#evil\x1b\\after", "after"},
+		{"APC payload dropped", "\x1b_payload\x1b\\after", "after"},
+		{"BEL and CR dropped", "ding\x07dong\rline", "dingdongline"},
+		{"DEL dropped", "a\x7fb", "ab"},
+		{"lone trailing ESC dropped", "text\x1b", "text"},
+		{"unterminated OSC dropped", "\x1b]52;c;steal", ""},
+		{"unterminated CSI dropped", "text\x1b[12;34", "text"},
+	}
+	for _, c := range cases {
+		if got := sanitizeTTY(c.in); got != c.want {
+			t.Errorf("%s: sanitizeTTY(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}

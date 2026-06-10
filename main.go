@@ -297,11 +297,17 @@ func emitResult(res Result, wantStats, quiet, pretty bool) int {
 	// A streamed body (BodySink) was already written by Do and leaves
 	// res.Body empty, so this block only fires for buffered responses.
 	if len(res.Body) > 0 {
-		if color {
+		switch {
+		case color:
 			// width 0 -> renderBody uses a sane default for markdown wrapping.
-			fmt.Fprintln(os.Stdout, renderBody(res.Body, res.ContentType, res.URL, newStyles(), true, pretty, 0))
-		} else {
-			os.Stdout.Write(res.Body)
+			// sanitizeTTY guards the terminal: even pretty renders embed raw
+			// server text (string values, text bodies) that can carry OSC/CSI.
+			fmt.Fprintln(os.Stdout, sanitizeTTY(renderBody(res.Body, res.ContentType, res.URL, newStyles(), true, pretty, 0)))
+		case stdoutIsTTY():
+			// NO_COLOR at a terminal: raw view, but still a terminal to protect.
+			_, _ = os.Stdout.WriteString(sanitizeTTY(string(res.Body)))
+		default:
+			_, _ = os.Stdout.Write(res.Body) // pipe: exact server bytes, untouched
 		}
 	}
 
