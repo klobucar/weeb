@@ -105,6 +105,27 @@ func TestModelLifecycle(t *testing.T) {
 	}
 }
 
+// A custom -X method must survive into the TUI: prefill used to leave
+// methodIdx at 0 when the method wasn't in the fixed list, so `weeb -X PURGE
+// url` at a TTY silently sent GET.
+func TestPrefillCustomMethod(t *testing.T) {
+	m := testModel()
+	m.prefill(cliArgs{method: "purge", url: "http://x"})
+	if got := m.currentMethod(); got != "PURGE" {
+		t.Errorf("currentMethod = %q, want PURGE", got)
+	}
+
+	// Known methods still select the existing entry instead of duplicating it.
+	m = testModel()
+	m.prefill(cliArgs{method: "post", url: "http://x"})
+	if got := m.currentMethod(); got != "POST" {
+		t.Errorf("currentMethod = %q, want POST", got)
+	}
+	if len(m.methods) != 7 {
+		t.Errorf("methods grew to %v, want the original 7", m.methods)
+	}
+}
+
 func TestResolveSpecPrefills(t *testing.T) {
 	t.Setenv("WEEB_BASE_URL", "https://api.example.com")
 	t.Setenv("WEEB_HEADERS", "X-A:1;X-B:2")
