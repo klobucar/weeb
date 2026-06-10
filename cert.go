@@ -327,12 +327,12 @@ func verifyChain(host string, certs []*x509.Certificate) (bool, string) {
 
 func describeCert(c *x509.Certificate) certInfo {
 	return certInfo{
-		SubjectCN:       c.Subject.CommonName,
-		Subject:         c.Subject.String(),
-		IssuerCN:        c.Issuer.CommonName,
-		Issuer:          c.Issuer.String(),
-		NotBefore:       c.NotBefore,
-		NotAfter:        c.NotAfter,
+		SubjectCN: c.Subject.CommonName,
+		Subject:   c.Subject.String(),
+		IssuerCN:  c.Issuer.CommonName,
+		Issuer:    c.Issuer.String(),
+		NotBefore: c.NotBefore,
+		NotAfter:  c.NotAfter,
 		// Floor, not truncate: a cert expired by less than a day must report a
 		// negative count so certExit's `< 0` check fires (int() rounds -0.5 to
 		// 0, which kept monitors green for up to 24h after expiry).
