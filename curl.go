@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -167,7 +168,14 @@ func parseCurl(argv []string) (RequestSpec, error) {
 			if err != nil {
 				return spec, err
 			}
-			if flag != "--data-raw" && strings.HasPrefix(v, "@") {
+			if flag == "--data-urlencode" {
+				// Not a raw --data alias: curl URL-encodes the content part.
+				// Passing it through raw silently changes what the server
+				// parses (an & in the value becomes a field separator).
+				if v, err = urlencodeDataItem(v); err != nil {
+					return spec, err
+				}
+			} else if flag != "--data-raw" && strings.HasPrefix(v, "@") {
 				b, err := os.ReadFile(v[1:])
 				if err != nil {
 					return spec, fmt.Errorf("curl: reading %q: %w", v[1:], err)
@@ -290,6 +298,41 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		}
 	}
 	return spec, nil
+}
+
+// urlencodeDataItem resolves one --data-urlencode value the way curl does:
+//
+//	content        encode all of it
+//	=content       encode everything after the leading =
+//	name=content   send name=<encoded content> (the name passes through)
+//	@file          encode the file's contents
+//	name@file      send name=<encoded file contents>
+//
+// The first = or @ decides the form, = winning, matching curl's parser.
+func urlencodeDataItem(v string) (string, error) {
+	name := ""
+	if i := strings.IndexByte(v, '='); i >= 0 {
+		name, v = v[:i], v[i+1:]
+	} else if i := strings.IndexByte(v, '@'); i >= 0 {
+		name, v = v[:i], v[i+1:]
+		b, err := os.ReadFile(v)
+		if err != nil {
+			return "", fmt.Errorf("curl: reading %q: %w", v, err)
+		}
+		v = string(b)
+	}
+	enc := curlEscape(v)
+	if name != "" {
+		return name + "=" + enc, nil
+	}
+	return enc, nil
+}
+
+// curlEscape percent-encodes s like curl_easy_escape: every byte outside
+// ASCII alphanumerics and -._~ becomes %XX. url.QueryEscape almost matches
+// but encodes space as +, which curl does not.
+func curlEscape(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 
 // isShortBoolCluster reports whether every letter in a clustered short flag

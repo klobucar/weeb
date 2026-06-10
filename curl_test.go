@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -146,6 +148,61 @@ func TestParseCurlMultipleData(t *testing.T) {
 	if string(s.Body) != "a=1&b=2" {
 		t.Errorf("joined body = %q, want a=1&b=2", s.Body)
 	}
+}
+
+// --data-urlencode must encode the content part like curl does — passing it
+// through raw changes what the server parses (an & in the value becomes a
+// field separator) with no signal the import was unfaithful.
+func TestParseCurlDataURLEncode(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"name=content encodes content", "q=a&b=c d", "q=a%26b%3Dc%20d"},
+		{"name passes through", "q=hello world", "q=hello%20world"},
+		{"=content strips the leading =", "=a b", "a%20b"},
+		{"bare content encodes all of it", "a b&c d", "a%20b%26c%20d"},
+		{"unreserved chars untouched", "k=a-b.c_d~e", "k=a-b.c_d~e"},
+	}
+	for _, c := range cases {
+		s, err := parseCurl([]string{"curl", "https://x", "--data-urlencode", c.in})
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if string(s.Body) != c.want {
+			t.Errorf("%s: body = %q, want %q", c.name, s.Body, c.want)
+		}
+		if s.Method != "POST" {
+			t.Errorf("%s: method = %q, want POST", c.name, s.Method)
+		}
+	}
+
+	t.Run("name@file encodes file contents", func(t *testing.T) {
+		f := filepath.Join(t.TempDir(), "payload.txt")
+		if err := os.WriteFile(f, []byte("hello world&more"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, err := parseCurl([]string{"curl", "https://x", "--data-urlencode", "n@" + f})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "n=hello%20world%26more"; string(s.Body) != want {
+			t.Errorf("body = %q, want %q", s.Body, want)
+		}
+	})
+
+	t.Run("missing @file errors", func(t *testing.T) {
+		if _, err := parseCurl([]string{"curl", "https://x", "--data-urlencode", "n@/no/such/file"}); err == nil {
+			t.Error("missing file should error")
+		}
+	})
+
+	t.Run("mixes with -d and -G", func(t *testing.T) {
+		s, err := parseCurl([]string{"curl", "-G", "https://x", "-d", "a=1", "--data-urlencode", "q=b c"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.URL != "https://x?a=1&q=b%20c" {
+			t.Errorf("url = %q, want https://x?a=1&q=b%%20c", s.URL)
+		}
+	})
 }
 
 func TestToCurlAndRoundTrip(t *testing.T) {

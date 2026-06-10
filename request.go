@@ -269,8 +269,8 @@ func (c *Client) Do(spec RequestSpec) Result {
 		body, readErr = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 		if readErr == nil && int64(len(body)) > maxBodyBytes {
 			body = body[:maxBodyBytes]
-			readErr = fmt.Errorf("response body exceeds %d MiB; keeping the first %d MiB",
-				maxBodyBytes>>20, maxBodyBytes>>20)
+			capStr := humanSize(int(maxBodyBytes))
+			readErr = fmt.Errorf("response body exceeds %s; keeping the first %s", capStr, capStr)
 		}
 		bodySize = int64(len(body))
 	}

@@ -55,9 +55,10 @@ func TestWrapIndentMatchesReference(t *testing.T) {
 	}
 }
 
-// Styled input: the new Hardwrap path carries SGR state across rows (an
-// improvement over per-chunk Cut), so compare content and row widths rather
-// than exact bytes.
+// Styled input: every wrapped row must be ANSI-self-contained — the open
+// style re-emitted at the row's start and reset before its end. The viewport
+// renders rows independently, so a row that leaves SGR open bleeds its color
+// into the hang-indent pad, the rows below, and the pane border.
 func TestWrapIndentStyled(t *testing.T) {
 	styled := "  \x1b[31m" + strings.Repeat("r", 250) + "\x1b[0m"
 	out := wrapIndent(styled, 80)
@@ -65,11 +66,36 @@ func TestWrapIndentStyled(t *testing.T) {
 		if w := ansi.StringWidth(row); w > 80 {
 			t.Errorf("row %d is %d cells wide, want <= 80", i, w)
 		}
+		if open := sgrStateAfter("", row); open != "" {
+			t.Errorf("row %d leaves SGR %q open past its end", i, open)
+		}
+		if i > 0 && !strings.Contains(row, "\x1b[31m") {
+			t.Errorf("row %d lost the red foreground: %q", i, row)
+		}
 	}
 	stripped := strings.ReplaceAll(ansi.Strip(out), "\n", "")
 	stripped = strings.ReplaceAll(stripped, " ", "")
 	if want := strings.Repeat("r", 250); stripped != want {
 		t.Errorf("styled content mangled: got %d r's, want 250", len(stripped))
+	}
+}
+
+func TestSGRStateAfter(t *testing.T) {
+	cases := []struct{ name, state, row, want string }{
+		{"no sequences", "", "plain", ""},
+		{"opens and stays open", "", "\x1b[33mtext", "\x1b[33m"},
+		{"opens and closes", "", "\x1b[33mtext\x1b[0m", ""},
+		{"bare reset closes", "\x1b[33m", "text\x1b[m", ""},
+		{"carried state survives a plain row", "\x1b[33m", "text", "\x1b[33m"},
+		{"styles accumulate", "", "\x1b[1m\x1b[33mtext", "\x1b[1m\x1b[33m"},
+		{"reset then reopen", "\x1b[1m", "a\x1b[0mb\x1b[35mc", "\x1b[35m"},
+		{"leading-zero reset keeps the rest", "\x1b[1m", "\x1b[0;4mtext", "\x1b[4m"},
+		{"non-SGR CSI ignored", "", "\x1b[2Ktext", ""},
+	}
+	for _, c := range cases {
+		if got := sgrStateAfter(c.state, c.row); got != c.want {
+			t.Errorf("%s: sgrStateAfter(%q, %q) = %q, want %q", c.name, c.state, c.row, got, c.want)
+		}
 	}
 }
 

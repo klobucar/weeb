@@ -1,6 +1,29 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+// pipeStdin replaces os.Stdin with a pipe carrying s for the test's duration,
+// so parseCLI sees a piped (non-TTY) stdin exactly as in `cmd | weeb URL`.
+func pipeStdin(t *testing.T, s string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = old
+		_ = r.Close()
+	})
+}
 
 func TestParseCLI(t *testing.T) {
 	t.Run("method and url", func(t *testing.T) {
@@ -77,6 +100,37 @@ func TestParseCLI(t *testing.T) {
 		a, _ := parseCLI([]string{"GET", "https://x", "-d", "a=1"})
 		if a.method != "GET" {
 			t.Errorf("method = %q, want GET (explicitly requested)", a.method)
+		}
+	})
+
+	t.Run("piped stdin does not flip GET to POST", func(t *testing.T) {
+		// `some_cmd | weeb URL` often carries output never meant as a body;
+		// only an explicit -d body may imply POST.
+		pipeStdin(t, "piped")
+		a, err := parseCLI([]string{"https://x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(a.body) != "piped" {
+			t.Errorf("piped stdin should still be read as the body, got %q", a.body)
+		}
+		if a.method != "GET" {
+			t.Errorf("method = %q, want GET (no explicit body source)", a.method)
+		}
+	})
+
+	t.Run("dash body reads stdin and implies POST", func(t *testing.T) {
+		// -d - is an EXPLICIT request to send stdin as the body.
+		pipeStdin(t, "piped")
+		a, err := parseCLI([]string{"https://x", "-d", "-"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(a.body) != "piped" {
+			t.Errorf("-d - should read stdin, got %q", a.body)
+		}
+		if a.method != "POST" {
+			t.Errorf("method = %q, want POST (-d given)", a.method)
 		}
 	})
 
