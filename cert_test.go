@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"math/big"
 	"net"
@@ -64,6 +65,31 @@ func TestCertExit(t *testing.T) {
 	}
 	if certExit(expired, false) != 1 {
 		t.Error("expired -> 1")
+	}
+}
+
+// A cert expired by less than a day must report a negative day count so
+// certExit catches it even with --insecure (int truncation used to round
+// -0.5 up to 0 and monitors stayed green for up to 24h after expiry).
+func TestDaysUntilExpiryJustExpired(t *testing.T) {
+	expired := describeCert(&x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotAfter:     time.Now().Add(-12 * time.Hour),
+	})
+	if expired.DaysUntilExpiry >= 0 {
+		t.Errorf("cert expired 12h ago: DaysUntilExpiry = %d, want < 0", expired.DaysUntilExpiry)
+	}
+	rep := &certReport{Verified: true, Chain: []certInfo{expired}}
+	if certExit(rep, true) != 1 {
+		t.Error("just-expired cert with --insecure -> want exit 1")
+	}
+
+	expiring := describeCert(&x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotAfter:     time.Now().Add(12 * time.Hour),
+	})
+	if expiring.DaysUntilExpiry != 0 {
+		t.Errorf("cert valid 12h more: DaysUntilExpiry = %d, want 0", expiring.DaysUntilExpiry)
 	}
 }
 
