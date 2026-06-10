@@ -132,6 +132,16 @@ type foldNode interface {
 	kids() []foldNode
 }
 
+// asFoldNodes boxes a typed child slice as []foldNode so each tree type's
+// kids() is a one-liner instead of three copies of the same loop.
+func asFoldNodes[T foldNode](cs []T) []foldNode {
+	out := make([]foldNode, len(cs))
+	for i, c := range cs {
+		out[i] = c
+	}
+	return out
+}
+
 // visibleNodes returns the foldable nodes in visual (pre-order) order, skipping
 // the root and anything hidden inside a collapsed ancestor. This is exactly the
 // set the fold cursor steps through, and it matches the renderers' line order.

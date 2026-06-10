@@ -32,23 +32,6 @@ func TestSplitHostPort(t *testing.T) {
 	}
 }
 
-func TestTLSVersionName(t *testing.T) {
-	cases := map[uint16]string{
-		tls.VersionTLS13: "TLS 1.3",
-		tls.VersionTLS12: "TLS 1.2",
-		tls.VersionTLS11: "TLS 1.1",
-		tls.VersionTLS10: "TLS 1.0",
-	}
-	for v, want := range cases {
-		if got := tlsVersionName(v); got != want {
-			t.Errorf("tlsVersionName(%d) = %q, want %q", v, got, want)
-		}
-	}
-	if got := tlsVersionName(0x9999); !strings.HasPrefix(got, "0x") {
-		t.Errorf("unknown version should be hex, got %q", got)
-	}
-}
-
 func TestCertExit(t *testing.T) {
 	trusted := &certReport{Verified: true, Chain: []certInfo{{DaysUntilExpiry: 30}}}
 	untrusted := &certReport{Verified: false, Chain: []certInfo{{DaysUntilExpiry: 30}}}

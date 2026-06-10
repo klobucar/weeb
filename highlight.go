@@ -182,6 +182,6 @@ func statusBadge(r Result, st styles) string {
 	col := statusColor(r.Status)
 	badge := lipgloss.NewStyle().Bold(true).Foreground(cInk).Background(col).Padding(0, 1).
 		Render(fmt.Sprintf("%d %s", r.Status, r.StatusText))
-	meta := st.meta.Render(fmt.Sprintf("  %s  ·  %d ms  ·  %d bytes", r.Proto, r.Duration.Milliseconds(), r.bodySize()))
+	meta := st.meta.Render(fmt.Sprintf("  %s  ·  %d ms  ·  %d bytes", r.Proto, r.Timing.Total.Milliseconds(), r.bodySize()))
 	return badge + meta
 }

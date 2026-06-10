@@ -92,8 +92,3 @@ func gradientText(s string, h0, h1 float64, bold bool) string {
 	}
 	return b.String()
 }
-
-// gradientHue returns the single color at position t∈[0,1] along the h0→h1 sweep.
-func gradientHue(h0, h1, t float64) color.Color {
-	return lipgloss.Color(hslHex(h0+(h1-h0)*t, 0.85, 0.6))
-}

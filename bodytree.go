@@ -101,13 +101,7 @@ func parseValue(dec *json.Decoder, key string, hasKey bool) (*bnode, error) {
 func (n *bnode) foldable() bool   { return n.kind != bScalar && len(n.children) > 0 }
 func (n *bnode) getFolded() bool  { return n.folded }
 func (n *bnode) setFolded(v bool) { n.folded = v }
-func (n *bnode) kids() []foldNode {
-	out := make([]foldNode, len(n.children))
-	for i, c := range n.children {
-		out[i] = c
-	}
-	return out
-}
+func (n *bnode) kids() []foldNode { return asFoldNodes(n.children) }
 
 // ---- rendering -------------------------------------------------------------
 
