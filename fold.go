@@ -46,9 +46,14 @@ func wrapIndent(s string, width int) string {
 	return strings.Join(out, "\n")
 }
 
-// setResp sets the response viewport's content, hang-indent wrapped to its width.
+// setResp sets the response viewport's content, hang-indent wrapped to its
+// width. Everything the pane shows funnels through here, so it doubles as the
+// TUI's sanitizing boundary: server-influenced text (bodies, cert fields, TLS
+// names) is stripped of hostile control sequences — Bubble Tea's renderer
+// drops mid-content escapes on its own, but a trailing OSC would survive it —
+// while weeb's own SGR/OSC 8 styling passes through sanitizeTTY intact.
 func (m *model) setResp(content string) {
-	m.resp.SetContent(wrapIndent(content, m.resp.Width()))
+	m.resp.SetContent(wrapIndent(sanitizeTTY(content), m.resp.Width()))
 }
 
 // respSection is one collapsible block of the response pane. When folded, only

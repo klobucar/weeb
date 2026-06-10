@@ -275,3 +275,55 @@ func TestStartTLSErrors(t *testing.T) {
 	}
 	c2.Close()
 }
+
+// A self-signed peer controls every string in its certificate — Subject and
+// Issuer CNs, SANs — and the verify-error text quotes them. runCert prints the
+// report through outW, whose TTY form is sanitizingWriter; this proves a CN
+// carrying OSC 52 (clipboard write) is neutralized at that boundary while the
+// surrounding text survives.
+func TestCertReportSanitizedAtTTYBoundary(t *testing.T) {
+	const osc52 = "\x1b]52;c;ZXZpbA==\x07"
+	evil := osc52 + "evil-cn"
+	rep := &certReport{
+		Host: "victim.test", Port: "443",
+		TLSVersion: "TLS 1.3", Cipher: "TLS_AES_128_GCM_SHA256",
+		VerifyErr: "x509: certificate signed by unknown authority: " + evil,
+		Chain: []certInfo{{
+			SubjectCN: evil, Subject: "CN=" + evil,
+			IssuerCN: evil, Issuer: "CN=" + evil,
+			DNSNames:  []string{evil},
+			NotBefore: time.Now(), NotAfter: time.Now().Add(24 * time.Hour),
+			DaysUntilExpiry: 1,
+		}},
+	}
+
+	var buf strings.Builder
+	fmt.Fprint(sanitizingWriter{w: &buf}, renderCertReport(rep, newStyles(), true, 100, true))
+	out := buf.String()
+	if strings.Contains(out, "]52;") {
+		t.Errorf("OSC 52 from cert fields reached the terminal:\n%q", out)
+	}
+	if !strings.Contains(out, "evil-cn") {
+		t.Errorf("cert CN text should survive sanitization:\n%q", out)
+	}
+}
+
+// The stats block prints the TLS leaf CN (peer-controlled) to stderr at a TTY;
+// emitResult goes through errW, whose TTY form is sanitizingWriter.
+func TestConnTLSSanitizedAtTTYBoundary(t *testing.T) {
+	const osc52 = "\x1b]52;c;ZXZpbA==\x07"
+	c := &connTLS{
+		Version: "TLS 1.3", Cipher: "TLS_AES_128_GCM_SHA256",
+		Leaf: &certInfo{SubjectCN: osc52 + "leaf-cn", DaysUntilExpiry: 10},
+	}
+
+	var buf strings.Builder
+	fmt.Fprintln(sanitizingWriter{w: &buf}, renderConnTLS(c, newStyles()))
+	out := buf.String()
+	if strings.Contains(out, "]52;") {
+		t.Errorf("OSC 52 from the TLS leaf CN reached the terminal:\n%q", out)
+	}
+	if !strings.Contains(out, "leaf-cn") {
+		t.Errorf("leaf CN text should survive sanitization:\n%q", out)
+	}
+}
