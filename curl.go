@@ -261,8 +261,21 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		}
 	}
 
+	if strings.TrimSpace(spec.URL) == "" {
+		return spec, fmt.Errorf("curl: no URL found in command")
+	}
 	if len(data) > 0 {
-		spec.Body = []byte(strings.Join(data, "&"))
+		joined := strings.Join(data, "&")
+		if forceGet {
+			// -G sends the data as the URL query instead of a body, like curl.
+			sep := "?"
+			if strings.Contains(spec.URL, "?") {
+				sep = "&"
+			}
+			spec.URL += sep + joined
+		} else {
+			spec.Body = []byte(joined)
+		}
 	}
 	if !methodSet {
 		switch {
@@ -275,9 +288,6 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		default:
 			spec.Method = "GET"
 		}
-	}
-	if strings.TrimSpace(spec.URL) == "" {
-		return spec, fmt.Errorf("curl: no URL found in command")
 	}
 	return spec, nil
 }

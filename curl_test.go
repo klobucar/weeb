@@ -115,6 +115,32 @@ func TestParseCurlUnknownFlag(t *testing.T) {
 	}
 }
 
+// -G must send -d data as the URL query, like curl: it used to leave the data
+// in the body, which buildRequest then dropped for GET — the parameters
+// vanished from the request entirely.
+func TestParseCurlGetWithData(t *testing.T) {
+	s, err := parseCurl([]string{"curl", "-G", "-d", "limit=10", "-d", "q=foo", "https://x/search"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Method != "GET" || s.URL != "https://x/search?limit=10&q=foo" || len(s.Body) != 0 {
+		t.Errorf("got method=%q url=%q body=%q; want GET https://x/search?limit=10&q=foo with no body",
+			s.Method, s.URL, s.Body)
+	}
+
+	// An existing query string is extended, not duplicated.
+	s, _ = parseCurl([]string{"curl", "-G", "-d", "b=2", "https://x?a=1"})
+	if s.URL != "https://x?a=1&b=2" {
+		t.Errorf("url = %q, want https://x?a=1&b=2", s.URL)
+	}
+
+	// -G with -I keeps HEAD but still moves the data into the query.
+	s, _ = parseCurl([]string{"curl", "-G", "-I", "-d", "a=1", "https://x"})
+	if s.Method != "HEAD" || s.URL != "https://x?a=1" {
+		t.Errorf("got method=%q url=%q, want HEAD https://x?a=1", s.Method, s.URL)
+	}
+}
+
 func TestParseCurlMultipleData(t *testing.T) {
 	s, _ := parseCurl([]string{"curl", "https://x", "-d", "a=1", "-d", "b=2"})
 	if string(s.Body) != "a=1&b=2" {
