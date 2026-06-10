@@ -82,18 +82,56 @@ func TestRedirectStripsCredentialsCrossOrigin(t *testing.T) {
 	}
 }
 
+// A user-typed header whose name collides with a WEEB_HEADERS key is the
+// user's own — resolveSpec never injects the env copy — so it must follow a
+// cross-origin redirect like any custom header (as curl does), while a header
+// that really came from the env is still stripped.
+func TestRedirectKeepsUserTypedHeaderCrossOrigin(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "X-Api-Key:env-secret;X-Env-Only:sekrit")
+	t.Setenv("WEEB_TOKEN", "")
+
+	var gotKey, gotEnvOnly string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("X-Api-Key")
+		gotEnvOnly = r.Header.Get("X-Env-Only")
+	}))
+	defer target.Close()
+	// A second loopback server has a different port: a different origin.
+	hopper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer hopper.Close()
+
+	res := testClient().Do(RequestSpec{
+		Method:  "GET",
+		URL:     hopper.URL,
+		Headers: []Header{{Key: "X-Api-Key", Value: "mine"}},
+	})
+	if !res.OK() {
+		t.Fatalf("request failed: %v", res.Err)
+	}
+	if gotKey != "mine" {
+		t.Errorf("user-typed X-Api-Key should survive the redirect, got %q", gotKey)
+	}
+	if gotEnvOnly != "" {
+		t.Errorf("env-injected X-Env-Only followed a cross-origin redirect: %q", gotEnvOnly)
+	}
+}
+
 func TestRedirectKeepsCredentialsSameOrigin(t *testing.T) {
 	t.Setenv("WEEB_BASE_URL", "")
-	t.Setenv("WEEB_HEADERS", "")
+	t.Setenv("WEEB_HEADERS", "X-Api-Key:sekrit")
 	t.Setenv("WEEB_TOKEN", "tok")
 
-	var gotAuth string
+	var gotAuth, gotKey string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/final", http.StatusFound)
 	})
 	mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
+		gotKey = r.Header.Get("X-Api-Key")
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -104,6 +142,9 @@ func TestRedirectKeepsCredentialsSameOrigin(t *testing.T) {
 	}
 	if gotAuth != "Bearer tok" {
 		t.Errorf("same-origin redirect should keep Authorization, got %q", gotAuth)
+	}
+	if gotKey != "sekrit" {
+		t.Errorf("same-origin redirect should keep env-injected X-Api-Key, got %q", gotKey)
 	}
 }
 
