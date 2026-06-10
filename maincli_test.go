@@ -37,6 +37,7 @@ func TestParseCLI(t *testing.T) {
 		a, err := parseCLI([]string{
 			"https://x", "-X", "PUT", "--timeout", "5s",
 			"--raw", "-q", "--no-tui", "--to-curl", "--persona", "tsun", "-v",
+			"-o", "out.bin", "--max-body", "256m",
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -52,6 +53,12 @@ func TestParseCLI(t *testing.T) {
 		}
 		if a.persona != "tsun" {
 			t.Errorf("persona = %q", a.persona)
+		}
+		if a.output != "out.bin" || a.maxBody != "256m" {
+			t.Errorf("output/max-body = %q/%q", a.output, a.maxBody)
+		}
+		if !a.headless() {
+			t.Error("-o should imply headless")
 		}
 	})
 

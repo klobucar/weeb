@@ -85,10 +85,11 @@ func printVersion(w io.Writer) {
 
 // headless reports whether a parsed request should run as a one-shot CLI rather
 // than opening the interactive TUI. We go headless when output is shaped for a
-// pipe/script — stdout isn't a terminal, or a body is piped into stdin — or when
-// a flag asks for it (--no-tui, --raw, --to-curl).
+// pipe/script — stdout isn't a terminal, a body is piped into stdin, or the
+// body goes to a file (-o) — or when a flag asks for it (--no-tui, --raw,
+// --to-curl).
 func (a cliArgs) headless() bool {
-	return a.noTUI || a.quiet || a.raw || a.toCurl || !stdoutIsTTY() || stdinIsPiped()
+	return a.noTUI || a.quiet || a.raw || a.toCurl || a.output != "" || !stdoutIsTTY() || stdinIsPiped()
 }
 
 // ---- TUI mode --------------------------------------------------------------
@@ -105,6 +106,15 @@ func runTUI(seed *cliArgs) int {
 			return 2
 		}
 		voice = errorChanFor(mode)
+	}
+
+	maxBody := ""
+	if seed != nil {
+		maxBody = seed.maxBody
+	}
+	if err := applyMaxBody(maxBody); err != nil {
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 2
 	}
 
 	client := newClient(logger, voice)
@@ -142,6 +152,8 @@ type cliArgs struct {
 	quiet   bool   // -q/--quiet: headless, and suppress the stats block (body + errors only)
 	toCurl  bool   // --to-curl: print the curl equivalent instead of sending
 	persona string // --persona: error voice for this run (overrides WEEB_PERSONA)
+	output  string // -o/--output: stream the body to this file (uncapped, like curl -o)
+	maxBody string // --max-body: buffered-body cap, e.g. "256m" (overrides WEEB_MAX_BODY)
 }
 
 // prettyOn resolves the body view: pretty is on by default (and at a TTY), with
@@ -182,6 +194,11 @@ func runCLI(a cliArgs) int {
 		return 2
 	}
 
+	if err := applyMaxBody(a.maxBody); err != nil {
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 2
+	}
+
 	logger, _, cleanup := newLogger(modeCLI)
 	defer cleanup()
 
@@ -190,16 +207,35 @@ func runCLI(a cliArgs) int {
 		client.http.Timeout = a.timeout
 	}
 
-	// A pipe always gets the raw bytes, so stream them as they arrive instead
-	// of buffering: constant memory for arbitrarily large downloads (the
-	// 64 MiB cap applies only to bodies weeb must hold to render), and the
-	// first bytes hit the pipe immediately, like curl.
-	if !stdoutIsTTY() {
+	// Stream the body when it isn't being rendered: to -o FILE when asked, or
+	// straight to a pipe (which always gets the raw bytes anyway). Constant
+	// memory for arbitrarily large downloads — the 64 MiB cap applies only to
+	// bodies weeb must hold to render — and the first bytes land immediately,
+	// like curl.
+	var outFile *os.File
+	if a.output != "" {
+		f, err := os.Create(a.output)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "weeb:", err)
+			return 2
+		}
+		outFile = f
+		spec.BodySink = f
+	} else if !stdoutIsTTY() {
 		spec.BodySink = os.Stdout
 	}
 
 	res := client.Do(spec)
-	return emitResult(res, a.stats, a.quiet, a.prettyOn())
+	code := emitResult(res, a.stats, a.quiet, a.prettyOn())
+	if outFile != nil {
+		if err := outFile.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "weeb:", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	return code
 }
 
 // runCurlImport handles `weeb curl <command>`: parse a curl command and run it.
@@ -223,6 +259,11 @@ func runCurlImport(args []string) int {
 
 	spec, err := parseCurl(argv)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 2
+	}
+
+	if err := applyMaxBody(""); err != nil { // WEEB_MAX_BODY still applies
 		fmt.Fprintln(os.Stderr, "weeb:", err)
 		return 2
 	}
@@ -538,6 +579,20 @@ func parseCLI(args []string) (cliArgs, error) {
 		case arg == "--to-curl" || arg == "--curl":
 			a.toCurl = true
 
+		case arg == "-o" || arg == "--output":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.output = val
+
+		case arg == "--max-body":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.maxBody = val
+
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			return a, fmt.Errorf("unknown flag %q", arg)
 
@@ -653,6 +708,10 @@ OPTIONS
       --persona MODE    error voice: plain (default) | dere | tsun | yan
                         (overrides WEEB_PERSONA for this run)
       --to-curl         print the curl equivalent of the request, don't send
+  -o, --output FILE     stream the response body to FILE (uncapped, like curl -o;
+                        implies headless)
+      --max-body SIZE   cap for bodies weeb buffers to render (default 64m);
+                        bytes or k/m/g, 0 = no cap. Piped/-o bodies are never capped
   -h, --help            show this help
 
 CURL IMPORT (weeb curl '<command>')
@@ -703,6 +762,8 @@ ENVIRONMENT (prefills, applied unless you override them)
   WEEB_PERSONA     error voice: plain (default) | dere | tsun | yan
   WEEB_RAINBOW     1/true to launch the TUI in 🌈 mode (toggle live with ctrl+y)
   WEEB_PRETTY      pretty body view; on by default, set 0/false for raw (toggle: ctrl+p)
+  WEEB_MAX_BODY    cap for buffered bodies, e.g. 256m (default 64m, 0 = no cap;
+                   --max-body wins; piped/-o bodies are never capped)
 
 LOGGING (structured diagnostics; never on stdout)
   WEEB_LOG         debug|info|warn|error|off        (default: warn)

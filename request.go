@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,8 +22,67 @@ const defaultTimeout = 30 * time.Second
 // maxBodyBytes caps how much of a response body is buffered. Everything weeb
 // does with a body (pretty-print, tree views, TUI render) needs it in memory,
 // so an unbounded read would let a hostile or runaway server stream gigabytes
-// within the timeout window and OOM the process. A var so tests can lower it.
+// within the timeout window and OOM the process. A var so tests can lower it
+// and applyMaxBody can override it (--max-body / WEEB_MAX_BODY). Bodies
+// streamed to a BodySink are never capped.
 var maxBodyBytes int64 = 64 << 20 // 64 MiB
+
+// applyMaxBody sets the buffered-body cap: the --max-body flag value wins,
+// then WEEB_MAX_BODY, then the 64 MiB default stands. A value of 0 disables
+// the cap entirely.
+func applyMaxBody(flag string) error {
+	src := flag
+	if src == "" {
+		src = os.Getenv("WEEB_MAX_BODY")
+	}
+	if src == "" {
+		return nil
+	}
+	n, err := parseSize(src)
+	if err != nil {
+		return fmt.Errorf("bad body size limit %q (bytes, or k/m/g suffix, e.g. 256m; 0 = no cap)", src)
+	}
+	if n == 0 {
+		n = 1 << 62 // effectively uncapped, without overflowing the +1 probe read
+	}
+	maxBodyBytes = n
+	return nil
+}
+
+// parseSize parses a human byte size: a plain integer is bytes; k/m/g
+// suffixes are binary multiples, case-insensitive, with b/ib tolerated
+// ("64m", "1G", "512KiB", "1048576").
+func parseSize(s string) (int64, error) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	num, mult := t, int64(1)
+	switch {
+	case strings.HasSuffix(t, "kib"):
+		num, mult = t[:len(t)-3], 1<<10
+	case strings.HasSuffix(t, "mib"):
+		num, mult = t[:len(t)-3], 1<<20
+	case strings.HasSuffix(t, "gib"):
+		num, mult = t[:len(t)-3], 1<<30
+	case strings.HasSuffix(t, "kb"):
+		num, mult = t[:len(t)-2], 1<<10
+	case strings.HasSuffix(t, "mb"):
+		num, mult = t[:len(t)-2], 1<<20
+	case strings.HasSuffix(t, "gb"):
+		num, mult = t[:len(t)-2], 1<<30
+	case strings.HasSuffix(t, "k"):
+		num, mult = t[:len(t)-1], 1<<10
+	case strings.HasSuffix(t, "m"):
+		num, mult = t[:len(t)-1], 1<<20
+	case strings.HasSuffix(t, "g"):
+		num, mult = t[:len(t)-1], 1<<30
+	case strings.HasSuffix(t, "b"):
+		num = t[:len(t)-1]
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(num), 10, 64)
+	if err != nil || n < 0 || n > (1<<62)/mult {
+		return 0, fmt.Errorf("bad size %q", s)
+	}
+	return n * mult, nil
+}
 
 // Header is a single request header row.
 type Header struct {

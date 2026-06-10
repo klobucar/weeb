@@ -108,6 +108,8 @@ In headless mode the response **body** goes to stdout; weeb's errors, logs, and
 | `-q, --quiet` | Headless, body only — suppress the stats block (errors still show) |
 | `--persona MODE` | Error voice: `plain` (default) · `dere` · `tsun` · `yan` (overrides `WEEB_PERSONA`) |
 | `--to-curl` | Print the `curl` equivalent instead of sending |
+| `-o, --output FILE` | Stream the response body to a file, uncapped — like `curl -o` (implies headless) |
+| `--max-body SIZE` | Cap for bodies weeb buffers to render, e.g. `256m` (default `64m`, `0` = no cap; piped/`-o` bodies are never capped) |
 | `-h, --help` | Show help |
 
 `METHOD` is optional and defaults to `GET`. A URL with no scheme defaults to
@@ -225,6 +227,7 @@ Prefills are applied to every request unless you override them:
 | `WEEB_PERSONA` | Error voice: `plain` (default) · `dere` · `tsun` · `yan` (or `--persona`) |
 | `WEEB_RAINBOW` | `1`/`true` launches the TUI in 🌈 mode |
 | `WEEB_PRETTY` | Pretty body view; on by default, set `0`/`false` for raw |
+| `WEEB_MAX_BODY` | Cap for buffered bodies, e.g. `256m` (default `64m`, `0` = no cap; `--max-body` wins) |
 
 Logging is structured diagnostics, kept off stdout entirely:
 

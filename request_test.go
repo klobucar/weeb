@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	log "charm.land/log/v2"
@@ -215,6 +217,84 @@ func TestClientDoStreamsToSinkUncapped(t *testing.T) {
 	}
 	if res.BodySize != 4096 {
 		t.Errorf("BodySize = %d, want 4096", res.BodySize)
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	good := map[string]int64{
+		"1048576": 1 << 20,
+		"64m":     64 << 20,
+		"1G":      1 << 30,
+		"512KiB":  512 << 10,
+		"2kb":     2 << 10,
+		"100b":    100,
+		"0":       0,
+	}
+	for in, want := range good {
+		if got, err := parseSize(in); err != nil || got != want {
+			t.Errorf("parseSize(%q) = (%d, %v), want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "abc", "-1", "12q", "9999999999g"} {
+		if _, err := parseSize(in); err == nil {
+			t.Errorf("parseSize(%q) should error", in)
+		}
+	}
+}
+
+func TestApplyMaxBody(t *testing.T) {
+	old := maxBodyBytes
+	t.Cleanup(func() { maxBodyBytes = old })
+
+	// Default stands when neither flag nor env is set.
+	t.Setenv("WEEB_MAX_BODY", "")
+	maxBodyBytes = old
+	if err := applyMaxBody(""); err != nil || maxBodyBytes != old {
+		t.Errorf("no overrides: cap = %d, err = %v; want default %d", maxBodyBytes, err, old)
+	}
+
+	// Env applies; flag wins over env.
+	t.Setenv("WEEB_MAX_BODY", "1m")
+	if err := applyMaxBody(""); err != nil || maxBodyBytes != 1<<20 {
+		t.Errorf("env: cap = %d, err = %v; want 1MiB", maxBodyBytes, err)
+	}
+	if err := applyMaxBody("2m"); err != nil || maxBodyBytes != 2<<20 {
+		t.Errorf("flag should beat env: cap = %d, err = %v; want 2MiB", maxBodyBytes, err)
+	}
+
+	// 0 disables the cap.
+	if err := applyMaxBody("0"); err != nil || maxBodyBytes != 1<<62 {
+		t.Errorf("0: cap = %d, err = %v; want uncapped", maxBodyBytes, err)
+	}
+
+	if err := applyMaxBody("nope"); err == nil {
+		t.Error("bad size should error")
+	}
+}
+
+// -o streams the body to a file, uncapped, with a zero exit.
+func TestRunCLIOutputFile(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "")
+	t.Setenv("WEEB_TOKEN", "")
+	t.Setenv("WEEB_MAX_BODY", "")
+
+	payload := bytes.Repeat([]byte("weeb"), 1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "body.bin")
+	if code := runCLI(cliArgs{method: "GET", url: srv.URL, output: out}); code != 0 {
+		t.Fatalf("runCLI exit = %d, want 0", code)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("output file has %d bytes, want %d", len(got), len(payload))
 	}
 }
 
