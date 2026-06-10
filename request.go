@@ -72,12 +72,61 @@ type Client struct {
 
 func newClient(logger *log.Logger, voice ErrorChan) *Client {
 	return &Client{
-		// The zero-value CheckRedirect follows up to 10 redirects, which is the
-		// behaviour we want.
-		http:  &http.Client{Timeout: defaultTimeout},
+		http:  &http.Client{Timeout: defaultTimeout, CheckRedirect: redirectPolicy},
 		log:   logger,
 		voice: voice,
 	}
+}
+
+// redirectPolicy follows up to 10 redirects (the stdlib limit) but strips
+// credential headers when a redirect leaves the original origin. Go's default
+// policy only drops Authorization/Cookie on cross-DOMAIN hops — subdomains
+// are allowed, the scheme is ignored, and custom headers are never touched —
+// so the ambient env credentials weeb injects (WEEB_HEADERS, WEEB_TOKEN)
+// would otherwise follow a redirect to an attacker origin, and a bearer token
+// would survive a same-host https→http downgrade in cleartext.
+func redirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	if keepsCredentials(via[0].URL, req.URL) {
+		return nil
+	}
+	req.Header.Del("Authorization")
+	req.Header.Del("Proxy-Authorization")
+	req.Header.Del("Cookie")
+	for _, h := range parseHeaderList(os.Getenv("WEEB_HEADERS")) {
+		req.Header.Del(h.Key)
+	}
+	return nil
+}
+
+// keepsCredentials reports whether a redirect from orig to next stays within
+// the original origin closely enough to keep sending credentials.
+func keepsCredentials(orig, next *url.URL) bool {
+	if !strings.EqualFold(orig.Hostname(), next.Hostname()) {
+		return false
+	}
+	if orig.Scheme == "https" && next.Scheme == "http" {
+		return false // TLS downgrade: never send credentials in cleartext
+	}
+	if orig.Scheme == next.Scheme && effectivePort(orig) != effectivePort(next) {
+		return false // same scheme but another port is a different service
+	}
+	return true
+}
+
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch u.Scheme {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	}
+	return ""
 }
 
 // Do is THE chokepoint. It resolves env prefills, builds and executes the

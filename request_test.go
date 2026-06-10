@@ -40,6 +40,68 @@ func TestClientDoSuccess(t *testing.T) {
 	}
 }
 
+// Credentials — including env-injected custom headers Go's default policy
+// never strips — must not follow a redirect to another origin.
+func TestRedirectStripsCredentialsCrossOrigin(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "X-Api-Key:sekrit")
+	t.Setenv("WEEB_TOKEN", "tok")
+
+	var gotAuth, gotKey, gotAccept string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotKey = r.Header.Get("X-Api-Key")
+		gotAccept = r.Header.Get("Accept")
+	}))
+	defer target.Close()
+	// A second loopback server has a different port: a different origin.
+	hopper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer hopper.Close()
+
+	res := testClient().Do(RequestSpec{
+		Method:  "GET",
+		URL:     hopper.URL,
+		Headers: []Header{{Key: "Accept", Value: "application/json"}},
+	})
+	if !res.OK() {
+		t.Fatalf("request failed: %v", res.Err)
+	}
+	if gotAuth != "" || gotKey != "" {
+		t.Errorf("credentials followed a cross-origin redirect: Authorization=%q X-Api-Key=%q", gotAuth, gotKey)
+	}
+	// Non-credential headers still follow the redirect.
+	if gotAccept != "application/json" {
+		t.Errorf("Accept should survive the redirect, got %q", gotAccept)
+	}
+}
+
+func TestRedirectKeepsCredentialsSameOrigin(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "")
+	t.Setenv("WEEB_TOKEN", "tok")
+
+	var gotAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/final", http.StatusFound)
+	})
+	mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	res := testClient().Do(RequestSpec{Method: "GET", URL: srv.URL + "/start"})
+	if !res.OK() {
+		t.Fatalf("request failed: %v", res.Err)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Errorf("same-origin redirect should keep Authorization, got %q", gotAuth)
+	}
+}
+
 func TestClientDoStatusErrorSetsBothSeams(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
