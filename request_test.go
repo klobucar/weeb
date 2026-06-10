@@ -107,6 +107,77 @@ func TestRedirectKeepsCredentialsSameOrigin(t *testing.T) {
 	}
 }
 
+func TestNoFollowReturnsRedirectResponse(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "")
+	t.Setenv("WEEB_TOKEN", "")
+
+	targetHit := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/final", http.StatusFound)
+	})
+	mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) {
+		targetHit = true
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	res := testClient().Do(RequestSpec{Method: "GET", URL: srv.URL + "/start", NoFollow: true})
+	if !res.OK() {
+		t.Fatalf("a 3xx with NoFollow is not an error (status < 400): %v", res.Err)
+	}
+	if res.Status != http.StatusFound {
+		t.Errorf("Status = %d, want 302", res.Status)
+	}
+	if loc := res.Headers.Get("Location"); loc != "/final" {
+		t.Errorf("Location = %q, want /final", loc)
+	}
+	if len(res.Body) == 0 {
+		t.Error("the 3xx response body should come through")
+	}
+	if targetHit {
+		t.Error("NoFollow must not request the redirect target")
+	}
+	if len(res.Redirects) != 0 {
+		t.Errorf("no hop was followed, but Redirects = %v", res.Redirects)
+	}
+}
+
+func TestRedirectChainRecorded(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "")
+	t.Setenv("WEEB_TOKEN", "")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/next", http.StatusFound)
+	})
+	mux.HandleFunc("/next", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/final", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) {})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	res := testClient().Do(RequestSpec{Method: "GET", URL: srv.URL + "/start"})
+	if !res.OK() {
+		t.Fatalf("request failed: %v", res.Err)
+	}
+	want := []string{srv.URL + "/start", srv.URL + "/next", srv.URL + "/final"}
+	if len(res.Redirects) != len(want) {
+		t.Fatalf("Redirects = %v, want %v", res.Redirects, want)
+	}
+	for i := range want {
+		if res.Redirects[i] != want[i] {
+			t.Errorf("Redirects[%d] = %q, want %q", i, res.Redirects[i], want[i])
+		}
+	}
+	if res.URL != srv.URL+"/final" {
+		t.Errorf("URL = %q, want the final URL %q", res.URL, srv.URL+"/final")
+	}
+}
+
 // keepsCredentials compares effective ports regardless of scheme: a redirect
 // that changes both scheme AND port (http://h:8080 → https://h:8443) is a
 // different service on the host and must strip credentials, while the plain

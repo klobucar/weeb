@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -109,6 +110,10 @@ type RequestSpec struct {
 	// maxBodyBytes — the caller owns the destination (a pipe, a file), so
 	// memory stays constant no matter the size, like curl.
 	BodySink io.Writer
+
+	// NoFollow stops redirect following: the 3xx response itself comes back
+	// (status, Location header, body) instead of whatever it points at.
+	NoFollow bool
 }
 
 // Result is the outcome of handling one request. Body always holds the raw
@@ -131,6 +136,11 @@ type Result struct {
 	TLS         *connTLS
 	DisplayErr  string
 	Err         error
+
+	// Redirects is the URL chain when redirects were followed: the original
+	// URL first, then every hop taken, ending at the final URL (which is also
+	// what URL above holds). Empty when the request wasn't redirected.
+	Redirects []string
 }
 
 // OK reports whether the request fully succeeded (sent, received, status < 400).
@@ -162,6 +172,16 @@ func newClient(logger *log.Logger, voice ErrorChan) *Client {
 	}
 }
 
+// noFollowKey and redirectChainKey are unexported request-context keys. The
+// http.Client (and so its CheckRedirect) is shared across requests, so Do
+// passes per-request redirect signals to redirectPolicy on the request
+// context instead: noFollowKey carries a bool, redirectChainKey a *[]string
+// that collects the URL of every hop followed.
+type (
+	noFollowKey      struct{}
+	redirectChainKey struct{}
+)
+
 // redirectPolicy follows up to 10 redirects (the stdlib limit) but strips
 // credential headers when a redirect leaves the original origin. Go's default
 // policy only drops Authorization/Cookie on cross-DOMAIN hops — subdomains
@@ -170,8 +190,17 @@ func newClient(logger *log.Logger, voice ErrorChan) *Client {
 // would otherwise follow a redirect to an attacker origin, and a bearer token
 // would survive a same-host https→http downgrade in cleartext.
 func redirectPolicy(req *http.Request, via []*http.Request) error {
+	// A NoFollow spec wants the 3xx itself: ErrUseLastResponse hands back the
+	// redirect response, body and all, with no error.
+	if nf, _ := req.Context().Value(noFollowKey{}).(bool); nf {
+		return http.ErrUseLastResponse
+	}
 	if len(via) >= 10 {
 		return fmt.Errorf("stopped after 10 redirects")
+	}
+	// Record the hop for Result.Redirects (req is the upcoming request).
+	if chain, ok := req.Context().Value(redirectChainKey{}).(*[]string); ok {
+		*chain = append(*chain, req.URL.String())
 	}
 	if keepsCredentials(via[0].URL, req.URL) {
 		return nil
@@ -241,8 +270,15 @@ func (c *Client) Do(spec RequestSpec) Result {
 	rlog := c.log.With("method", req.Method, "url", res.URL)
 	rlog.Info("request")
 
+	// Redirect signals travel on the request context — see redirectPolicy.
+	var hops []string
+	ctx := context.WithValue(req.Context(), redirectChainKey{}, &hops)
+	if spec.NoFollow {
+		ctx = context.WithValue(ctx, noFollowKey{}, true)
+	}
+
 	tr := &reqTrace{}
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), tr.clientTrace()))
+	req = req.WithContext(httptrace.WithClientTrace(ctx, tr.clientTrace()))
 
 	start := time.Now()
 	tr.start = start
@@ -276,6 +312,13 @@ func (c *Client) Do(spec RequestSpec) Result {
 	}
 	done := time.Now()
 	dur := done.Sub(start)
+
+	// Redirects followed: prefix the original URL so the chain reads
+	// start → … → final, and point URL at where the request ended up.
+	if len(hops) > 0 {
+		res.Redirects = append([]string{res.URL}, hops...)
+		res.URL = resp.Request.URL.String()
+	}
 
 	res.Timing = tr.timing(done)
 	res.TLS = tlsSummary(resp.TLS)
