@@ -32,10 +32,15 @@ func wrapIndent(s string, width int) string {
 		}
 		pad := strings.Repeat(" ", hang)
 
+		// One Cut for the first row, one for the remainder, one Hardwrap pass
+		// for the continuation rows — linear in the line length. The old loop
+		// called ansi.Cut(line, pos, …) per chunk, and Cut rescans from byte 0
+		// every call, which made wrapping a single long line (a minified JSON
+		// body in raw view) quadratic — a multi-second freeze per render.
 		out = append(out, ansi.Cut(line, 0, width)) // first row keeps native indent
-		total := ansi.StringWidth(line)
-		for pos := width; pos < total; pos += contBudget {
-			out = append(out, pad+ansi.Cut(line, pos, pos+contBudget))
+		rest := ansi.Cut(line, width, ansi.StringWidth(line))
+		for _, seg := range strings.Split(ansi.Hardwrap(rest, contBudget, true), "\n") {
+			out = append(out, pad+seg)
 		}
 	}
 	return strings.Join(out, "\n")
