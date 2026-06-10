@@ -154,10 +154,34 @@ func TestSanitizeTTY(t *testing.T) {
 		{"lone trailing ESC dropped", "text\x1b", "text"},
 		{"unterminated OSC dropped", "\x1b]52;c;steal", ""},
 		{"unterminated CSI dropped", "text\x1b[12;34", "text"},
+		{"8-bit C1 OSC 52 dropped", "\x9d52;c;ZXZpbA==\x9cstolen", "stolen"},
+		{"8-bit C1 CSI dropped", "\x9b2Jtext", "text"},
+		{"CSI-smuggled OSC dropped", "\x1b[\x9d0;1\x07m", "m"},
+		{"unterminated OSC 8 dropped", "\x1b]8;;https://x", ""},
+		{"multibyte UTF-8 kept intact", "café ▾█ 日本語", "café ▾█ 日本語"},
+		{"UTF-8 around dropped sequence", "é\x1b]52;c;x\x07ñ", "éñ"},
 	}
 	for _, c := range cases {
 		if got := sanitizeTTY(c.in); got != c.want {
 			t.Errorf("%s: sanitizeTTY(%q) = %q, want %q", c.name, c.in, got, c.want)
 		}
+	}
+}
+
+// TestSanitizingWriter proves the TTY output boundary: hostile sequences are
+// stripped, weeb's own SGR styling survives, and the reported byte count
+// covers the full input so fmt.Fprint* callers never see a short write.
+func TestSanitizingWriter(t *testing.T) {
+	var buf strings.Builder
+	in := "hi\x1b]52;c;ZXZpbA==\x07 \x1b[31mred\x1b[0m"
+	n, err := sanitizingWriter{w: &buf}.Write([]byte(in))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(in) {
+		t.Errorf("Write reported %d bytes, want %d", n, len(in))
+	}
+	if got, want := buf.String(), "hi \x1b[31mred\x1b[0m"; got != want {
+		t.Errorf("sanitizingWriter wrote %q, want %q", got, want)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/glamour/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // bodyFormat is a normalized content kind weeb knows how to pretty-print.
@@ -356,69 +357,83 @@ func colorizeAttrs(s string, st styles) string {
 // text before it reaches a TTY. A hostile body could otherwise write the
 // clipboard (OSC 52), retitle the window, or move the cursor to spoof output.
 // SGR color (CSI…m) and OSC 8 hyperlinks — the only sequences weeb's own
-// renderers emit — are kept; everything else (other OSC, cursor/scroll CSI,
-// DCS/APC/PM/SOS payloads, stray C0 controls) is dropped. Piped output never
-// goes through here: pipes get the exact server bytes.
+// renderers emit — are kept; everything else (other CSI, other OSC, DCS/APC/
+// PM/SOS payloads, two-byte escapes, stray C0 controls, and the 8-bit C1
+// forms of all of these) is dropped. Decoding goes through ansi.DecodeSequence
+// rather than a byte scanner so multibyte UTF-8 text is never corrupted —
+// continuation bytes share the 0x80–0x9F range with C1 controls and only a
+// real decoder can tell them apart. Piped output never goes through here:
+// pipes get the exact server bytes.
 func sanitizeTTY(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
+	var b *strings.Builder // nil until the first drop: clean input is returned as-is
+	var state byte
+	p := ansi.NewParser()
 	for i := 0; i < len(s); {
-		c := s[i]
-		if c != 0x1b { // printable fast path
-			if c == '\n' || c == '\t' || (c >= 0x20 && c != 0x7f) {
-				b.WriteByte(c)
+		seq, width, n, newState := ansi.DecodeSequence(s[i:], state, p)
+		if n == 0 { // decoder can't advance; drop the remainder
+			if b == nil {
+				b = new(strings.Builder)
+				b.WriteString(s[:i])
 			}
-			i++
-			continue
+			break
 		}
-		if i+1 >= len(s) {
-			break // lone trailing ESC
+		if keepOnTTY(seq, width) {
+			if b != nil {
+				b.WriteString(seq)
+			}
+		} else if b == nil {
+			b = new(strings.Builder)
+			b.Grow(len(s))
+			b.WriteString(s[:i])
 		}
-		switch s[i+1] {
-		case '[': // CSI: parameters then one final byte in 0x40–0x7e
-			j := i + 2
-			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
-				j++
-			}
-			if j >= len(s) {
-				i = len(s)
-				break
-			}
-			if s[j] == 'm' {
-				b.WriteString(s[i : j+1]) // SGR: keep color/bold/reset
-			}
-			i = j + 1
-		case ']': // OSC: runs to BEL or ST (ESC \)
-			end := -1
-			for j := i + 2; j < len(s); j++ {
-				if s[j] == 0x07 {
-					end = j + 1
-					break
-				}
-				if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
-					end = j + 2
-					break
-				}
-			}
-			if end < 0 {
-				i = len(s)
-				break
-			}
-			if strings.HasPrefix(s[i+2:], "8;") {
-				b.WriteString(s[i:end]) // OSC 8 hyperlink: keep
-			}
-			i = end
-		case 'P', '_', '^', 'X': // DCS/APC/PM/SOS: string payload until ST
-			i += 2
-			for i < len(s) && !(s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\') {
-				i++
-			}
-			if i < len(s) {
-				i += 2
-			}
-		default: // two-byte escape (RIS, charset shifts, …): drop
-			i += 2
-		}
+		i += n
+		state = newState
+	}
+	if b == nil {
+		return s // fast path: nothing dropped (weeb's own SGR-styled output)
 	}
 	return b.String()
+}
+
+// keepOnTTY reports whether one decoded unit may pass through to a terminal:
+// a printable grapheme, newline/tab, an SGR sequence, or a terminated OSC 8
+// hyperlink (7- or 8-bit form either way).
+func keepOnTTY(seq string, width int) bool {
+	if width > 0 || seq == "\n" || seq == "\t" {
+		return true
+	}
+	if ansi.HasCsiPrefix(seq) && seq[len(seq)-1] == 'm' {
+		return true // SGR — a final 'm' also proves the sequence is complete
+	}
+	if ansi.HasOscPrefix(seq) {
+		body := seq[1:] // 8-bit OSC (0x9d)
+		if seq[0] == 0x1b {
+			body = seq[2:] // 7-bit ESC ]
+		}
+		// Unterminated OSCs are dropped even for 8;… — kept, they would make
+		// the terminal swallow whatever weeb prints next as payload.
+		return strings.HasPrefix(body, "8;") && hasOscTerminator(seq)
+	}
+	return false
+}
+
+func hasOscTerminator(seq string) bool {
+	return strings.HasSuffix(seq, "\x07") || // BEL
+		strings.HasSuffix(seq, "\x1b\\") || // 7-bit ST
+		strings.HasSuffix(seq, "\x9c") // 8-bit ST
+}
+
+// sanitizingWriter passes every Write through sanitizeTTY. It is the output
+// boundary wrapped around stdout/stderr when they are terminals (see outW/
+// errW in main.go), so every print path — current and future — neutralizes
+// server-influenced control sequences without each call site remembering to.
+// weeb's printers write whole strings/lines per call (fmt.Fprint*), so an
+// escape sequence is never sliced across two Writes.
+type sanitizingWriter struct{ w io.Writer }
+
+func (sw sanitizingWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(sw.w, sanitizeTTY(string(p))); err != nil {
+		return 0, err
+	}
+	return len(p), nil // report p fully consumed, even when bytes were dropped
 }

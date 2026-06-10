@@ -352,6 +352,29 @@ func TestFoldKeysKeepWrapping(t *testing.T) {
 	}
 }
 
+// setResp is the single place TUI viewport content is set; it must sanitize
+// server bytes. Bubble Tea's cell renderer drops mid-content escapes on its
+// own, but a body ENDING in an OSC 52 used to survive to the terminal — the
+// narrow real bypass — so that's the shape this drives end-to-end.
+func TestSetRespSanitizesServerBytes(t *testing.T) {
+	var m tea.Model = testModel()
+	m = send(t, m, tea.WindowSizeMsg{Width: 80, Height: 40})
+	m = send(t, m, resultMsg(Result{
+		Status: 200, StatusText: "OK", Proto: "HTTP/1.1",
+		Headers:     http.Header{"Content-Type": []string{"text/plain"}},
+		Body:        []byte("BODYMARK\x1b]52;c;ZXZpbA==\x07"),
+		ContentType: "text/plain",
+	}))
+
+	out := m.View().Content
+	if strings.Contains(out, "]52;") {
+		t.Errorf("OSC 52 from the response body reached the viewport:\n%q", out)
+	}
+	if !strings.Contains(out, "BODYMARK") {
+		t.Error("body text should survive sanitization")
+	}
+}
+
 var errTest = fmt.Errorf("dial tcp: connection refused")
 
 // focusResponse moves focus to the response pane so fold keys are live.

@@ -186,7 +186,11 @@ func redirectPolicy(req *http.Request, via []*http.Request) error {
 }
 
 // keepsCredentials reports whether a redirect from orig to next stays within
-// the original origin closely enough to keep sending credentials.
+// the original origin closely enough to keep sending credentials: the same
+// host, no TLS downgrade, and the same effective port — compared regardless
+// of scheme, so http://host:8080 → https://host:8443 can't reach a different
+// service on the host with credentials attached. The one allowed port change
+// is the default-port http(80) → https(443) upgrade.
 func keepsCredentials(orig, next *url.URL) bool {
 	if !strings.EqualFold(orig.Hostname(), next.Hostname()) {
 		return false
@@ -194,10 +198,12 @@ func keepsCredentials(orig, next *url.URL) bool {
 	if orig.Scheme == "https" && next.Scheme == "http" {
 		return false // TLS downgrade: never send credentials in cleartext
 	}
-	if orig.Scheme == next.Scheme && effectivePort(orig) != effectivePort(next) {
-		return false // same scheme but another port is a different service
+	op, np := effectivePort(orig), effectivePort(next)
+	if op == np {
+		return true
 	}
-	return true
+	// Another port is a different service — except the standard TLS upgrade.
+	return orig.Scheme == "http" && next.Scheme == "https" && op == "80" && np == "443"
 }
 
 func effectivePort(u *url.URL) string {

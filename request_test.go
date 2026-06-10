@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,6 +103,43 @@ func TestRedirectKeepsCredentialsSameOrigin(t *testing.T) {
 	}
 	if gotAuth != "Bearer tok" {
 		t.Errorf("same-origin redirect should keep Authorization, got %q", gotAuth)
+	}
+}
+
+// keepsCredentials compares effective ports regardless of scheme: a redirect
+// that changes both scheme AND port (http://h:8080 → https://h:8443) is a
+// different service on the host and must strip credentials, while the plain
+// default-port http→https upgrade stays credentialed.
+func TestKeepsCredentials(t *testing.T) {
+	cases := []struct {
+		name string
+		orig string
+		next string
+		want bool
+	}{
+		{"same origin", "https://api.example.com/a", "https://api.example.com/b", true},
+		{"same origin explicit default port", "https://api.example.com", "https://api.example.com:443", true},
+		{"apex to www stripped", "https://example.com", "https://www.example.com", false},
+		{"https to http downgrade stripped", "https://example.com", "http://example.com", false},
+		{"http to https default upgrade kept", "http://example.com", "https://example.com", true},
+		{"http to https same explicit port kept", "http://example.com:8443", "https://example.com:8443", true},
+		{"same scheme different port stripped", "http://example.com:8080", "http://example.com:9090", false},
+		{"cross-scheme port change stripped", "http://example.com:8080", "https://example.com:8443", false},
+		{"cross-scheme to default https port stripped", "http://example.com:8080", "https://example.com", false},
+		{"host case-insensitive", "https://API.example.com", "https://api.example.com", true},
+	}
+	for _, c := range cases {
+		orig, err := url.Parse(c.orig)
+		if err != nil {
+			t.Fatalf("%s: parse %q: %v", c.name, c.orig, err)
+		}
+		next, err := url.Parse(c.next)
+		if err != nil {
+			t.Fatalf("%s: parse %q: %v", c.name, c.next, err)
+		}
+		if got := keepsCredentials(orig, next); got != c.want {
+			t.Errorf("%s: keepsCredentials(%q, %q) = %v, want %v", c.name, c.orig, c.next, got, c.want)
+		}
 	}
 }
 

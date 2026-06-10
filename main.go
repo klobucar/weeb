@@ -22,6 +22,24 @@ var (
 	date    = "unknown"
 )
 
+// outW and errW are the process-wide print boundaries for stdout and stderr,
+// resolved once at startup. When the fd is a terminal, every write passes
+// through sanitizeTTY, so server-influenced text headed for a TTY — response
+// bodies, cert subject/issuer/SANs, TLS leaf names, verify and transport
+// error strings — is neutralized in one place and future print paths inherit
+// the guard. Pipes and files get the exact bytes (no wrapper).
+var (
+	outW = ttySafeWriter(os.Stdout)
+	errW = ttySafeWriter(os.Stderr)
+)
+
+func ttySafeWriter(f *os.File) io.Writer {
+	if term.IsTerminal(f.Fd()) {
+		return sanitizingWriter{w: f}
+	}
+	return f
+}
+
 func main() {
 	args := os.Args[1:]
 
@@ -282,16 +300,19 @@ func runCurlImport(args []string) int {
 // (raw when piped, colored at a TTY), and the stats block + weeb error to stderr.
 // The stats block shows automatically at a TTY (or with --stats when piping)
 // unless quiet suppresses it; the body and any error always go out.
+// Everything goes through outW/errW: at a TTY that boundary sanitizes the
+// server-influenced text (body, TLS leaf name, error strings); piped output
+// is the writer itself, so pipes still get the exact server bytes.
 func emitResult(res Result, wantStats, quiet, pretty bool) int {
 	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
 
 	if !quiet && (color || wantStats) && res.Status != 0 {
 		st := newStyles()
-		fmt.Fprintln(os.Stderr, statusBadge(res, st))
+		fmt.Fprintln(errW, statusBadge(res, st))
 		if res.TLS != nil {
-			fmt.Fprintln(os.Stderr, renderConnTLS(res.TLS, st))
+			fmt.Fprintln(errW, renderConnTLS(res.TLS, st))
 		}
-		fmt.Fprintln(os.Stderr, renderTiming(res.Timing, st, 50))
+		fmt.Fprintln(errW, renderTiming(res.Timing, st, 50))
 	}
 
 	// A streamed body (BodySink) was already written by Do and leaves
@@ -300,19 +321,17 @@ func emitResult(res Result, wantStats, quiet, pretty bool) int {
 		switch {
 		case color:
 			// width 0 -> renderBody uses a sane default for markdown wrapping.
-			// sanitizeTTY guards the terminal: even pretty renders embed raw
-			// server text (string values, text bodies) that can carry OSC/CSI.
-			fmt.Fprintln(os.Stdout, sanitizeTTY(renderBody(res.Body, res.ContentType, res.URL, newStyles(), true, pretty, 0)))
+			fmt.Fprintln(outW, renderBody(res.Body, res.ContentType, res.URL, newStyles(), true, pretty, 0))
 		case stdoutIsTTY():
 			// NO_COLOR at a terminal: raw view, but still a terminal to protect.
-			_, _ = os.Stdout.WriteString(sanitizeTTY(string(res.Body)))
+			_, _ = io.WriteString(outW, string(res.Body))
 		default:
-			_, _ = os.Stdout.Write(res.Body) // pipe: exact server bytes, untouched
+			_, _ = outW.Write(res.Body) // pipe: exact server bytes, untouched
 		}
 	}
 
 	if res.DisplayErr != "" {
-		fmt.Fprintln(os.Stderr, res.DisplayErr)
+		fmt.Fprintln(errW, res.DisplayErr)
 	}
 
 	if !res.OK() {
@@ -458,24 +477,27 @@ func runCert(args []string) int {
 	rep, err := fetchCertReport(target, opts)
 	if err != nil {
 		rlog.Error("tls inspect failed", "kind", KindTransport.String(), "err", err)
-		fmt.Fprintln(os.Stderr, voice.Render(KindTransport, 0, err))
+		fmt.Fprintln(errW, voice.Render(KindTransport, 0, err))
 		return 1
 	}
 	rlog.Info("tls ok",
 		"version", rep.TLSVersion, "verified", rep.Verified, "chain", len(rep.Chain))
 
 	if asPEM {
-		fmt.Fprint(os.Stdout, certPEM(rep))
+		fmt.Fprint(outW, certPEM(rep))
 		return certExit(rep, insecure)
 	}
 	if asJSON {
 		out, _ := json.MarshalIndent(rep, "", "  ")
-		fmt.Fprintln(os.Stdout, string(out))
+		fmt.Fprintln(outW, string(out))
 		return certExit(rep, insecure)
 	}
 
+	// The report carries peer-controlled bytes (Subject/Issuer CNs, SANs, the
+	// verify-error string — arbitrary for any self-signed cert); outW strips
+	// hostile control sequences at a TTY.
 	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
-	fmt.Fprint(os.Stdout, renderCertReport(rep, newStyles(), color, terminalWidth(), !brief))
+	fmt.Fprint(outW, renderCertReport(rep, newStyles(), color, terminalWidth(), !brief))
 	return certExit(rep, insecure)
 }
 
