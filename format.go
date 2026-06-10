@@ -341,3 +341,74 @@ func colorizeAttrs(s string, st styles) string {
 	}
 	return b.String()
 }
+
+// sanitizeTTY neutralizes terminal control sequences in server-influenced
+// text before it reaches a TTY. A hostile body could otherwise write the
+// clipboard (OSC 52), retitle the window, or move the cursor to spoof output.
+// SGR color (CSI…m) and OSC 8 hyperlinks — the only sequences weeb's own
+// renderers emit — are kept; everything else (other OSC, cursor/scroll CSI,
+// DCS/APC/PM/SOS payloads, stray C0 controls) is dropped. Piped output never
+// goes through here: pipes get the exact server bytes.
+func sanitizeTTY(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c != 0x1b { // printable fast path
+			if c == '\n' || c == '\t' || (c >= 0x20 && c != 0x7f) {
+				b.WriteByte(c)
+			}
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			break // lone trailing ESC
+		}
+		switch s[i+1] {
+		case '[': // CSI: parameters then one final byte in 0x40–0x7e
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			if j >= len(s) {
+				i = len(s)
+				break
+			}
+			if s[j] == 'm' {
+				b.WriteString(s[i : j+1]) // SGR: keep color/bold/reset
+			}
+			i = j + 1
+		case ']': // OSC: runs to BEL or ST (ESC \)
+			end := -1
+			for j := i + 2; j < len(s); j++ {
+				if s[j] == 0x07 {
+					end = j + 1
+					break
+				}
+				if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
+					end = j + 2
+					break
+				}
+			}
+			if end < 0 {
+				i = len(s)
+				break
+			}
+			if strings.HasPrefix(s[i+2:], "8;") {
+				b.WriteString(s[i:end]) // OSC 8 hyperlink: keep
+			}
+			i = end
+		case 'P', '_', '^', 'X': // DCS/APC/PM/SOS: string payload until ST
+			i += 2
+			for i < len(s) && !(s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\') {
+				i++
+			}
+			if i < len(s) {
+				i += 2
+			}
+		default: // two-byte escape (RIS, charset shifts, …): drop
+			i += 2
+		}
+	}
+	return b.String()
+}
