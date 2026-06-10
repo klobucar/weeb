@@ -289,7 +289,7 @@ func (m *model) moveFoldCursor(dir int) {
 		return
 	}
 	m.respCursor = (m.respCursor%n + dir + n) % n
-	m.resp.SetContent(m.composeResponse())
+	m.setResp(m.composeResponse())
 }
 
 // toggleFold collapses/expands whatever the cursor points at — a section or a
@@ -309,7 +309,7 @@ func (m *model) toggleFold() {
 		t.node.setFolded(!t.node.getFolded())
 	}
 	m.clampCursor()
-	m.resp.SetContent(m.composeResponse())
+	m.setResp(m.composeResponse())
 }
 
 // setAllFolded folds or unfolds everything — every section (sticky) and every
@@ -324,7 +324,7 @@ func (m *model) setAllFolded(folded bool) {
 		}
 	}
 	m.clampCursor()
-	m.resp.SetContent(m.composeResponse())
+	m.setResp(m.composeResponse())
 }
 
 // ---- summaries -------------------------------------------------------------
