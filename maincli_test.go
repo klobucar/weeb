@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"net/http"
 	"os"
 	"testing"
 )
@@ -85,6 +87,23 @@ func TestParseCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("include implies headless", func(t *testing.T) {
+		a, err := parseCLI([]string{"https://x", "-i"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !a.include {
+			t.Error("-i should set include")
+		}
+		if !a.headless() {
+			t.Error("-i should imply headless")
+		}
+		a, _ = parseCLI([]string{"https://x", "--include"})
+		if !a.include {
+			t.Error("--include should set include")
+		}
+	})
+
 	t.Run("body without method implies POST", func(t *testing.T) {
 		// A default GET would silently drop the body in buildRequest.
 		a, err := parseCLI([]string{"https://x", "-d", "a=1"})
@@ -158,6 +177,46 @@ func TestParseCLI(t *testing.T) {
 			t.Error("header without colon should error")
 		}
 	})
+}
+
+func TestEmitResultInclude(t *testing.T) {
+	// Capture stdout by swapping the package-level boundary writer; under
+	// `go test` stdout isn't a TTY, so the body is emitted as raw bytes.
+	var buf bytes.Buffer
+	old := outW
+	outW = &buf
+	t.Cleanup(func() { outW = old })
+
+	res := Result{
+		Status:     200,
+		StatusText: "OK",
+		Proto:      "HTTP/1.1",
+		Headers: http.Header{
+			"Content-Type": {"application/json"},
+			"Set-Cookie":   {"a=1", "b=2"},
+		},
+		Body: []byte(`{"ok":true}`),
+	}
+	if code := emitResult(res, false, true, false, true); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	want := "HTTP/1.1 200 OK\n" +
+		"Content-Type: application/json\n" +
+		"Set-Cookie: a=1\n" +
+		"Set-Cookie: b=2\n" +
+		"\n" +
+		`{"ok":true}`
+	if got := buf.String(); got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+
+	// Without -i nothing but the body reaches stdout.
+	buf.Reset()
+	emitResult(res, false, true, false, false)
+	if got := buf.String(); got != `{"ok":true}` {
+		t.Errorf("output without include = %q", got)
+	}
 }
 
 func TestPrettyOn(t *testing.T) {

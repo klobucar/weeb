@@ -105,9 +105,9 @@ func printVersion(w io.Writer) {
 // than opening the interactive TUI. We go headless when output is shaped for a
 // pipe/script — stdout isn't a terminal, a body is piped into stdin, or the
 // body goes to a file (-o) — or when a flag asks for it (--no-tui, --raw,
-// --to-curl).
+// --to-curl, -i).
 func (a cliArgs) headless() bool {
-	return a.noTUI || a.quiet || a.raw || a.toCurl || a.output != "" || !stdoutIsTTY() || stdinIsPiped()
+	return a.noTUI || a.quiet || a.raw || a.toCurl || a.include || a.output != "" || !stdoutIsTTY() || stdinIsPiped()
 }
 
 // ---- TUI mode --------------------------------------------------------------
@@ -168,6 +168,7 @@ type cliArgs struct {
 	raw     bool   // --raw: force the raw view (server bytes as-is)
 	noTUI   bool   // --no-tui: run headless even at a terminal
 	quiet   bool   // -q/--quiet: headless, and suppress the stats block (body + errors only)
+	include bool   // -i/--include: print the status line + response headers before the body (curl -i)
 	toCurl  bool   // --to-curl: print the curl equivalent instead of sending
 	persona string // --persona: error voice for this run (overrides WEEB_PERSONA)
 	output  string // -o/--output: stream the body to this file (uncapped, like curl -o)
@@ -229,7 +230,9 @@ func runCLI(a cliArgs) int {
 	// straight to a pipe (which always gets the raw bytes anyway). Constant
 	// memory for arbitrarily large downloads — the 64 MiB cap applies only to
 	// bodies weeb must hold to render — and the first bytes land immediately,
-	// like curl.
+	// like curl. With -i and no -o the body must buffer (cap applies) so the
+	// headers can print before it; -o keeps streaming since the headers go to
+	// stdout while the body goes to the file.
 	var outFile *os.File
 	if a.output != "" {
 		f, err := os.Create(a.output)
@@ -239,12 +242,12 @@ func runCLI(a cliArgs) int {
 		}
 		outFile = f
 		spec.BodySink = f
-	} else if !stdoutIsTTY() {
+	} else if !stdoutIsTTY() && !a.include {
 		spec.BodySink = os.Stdout
 	}
 
 	res := client.Do(spec)
-	code := emitResult(res, a.stats, a.quiet, a.prettyOn())
+	code := emitResult(res, a.stats, a.quiet, a.prettyOn(), a.include)
 	if outFile != nil {
 		if err := outFile.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, "weeb:", err)
@@ -293,7 +296,7 @@ func runCurlImport(args []string) int {
 		spec.BodySink = os.Stdout // piped: stream the raw bytes, uncapped
 	}
 	res := client.Do(spec)
-	return emitResult(res, false, false, envBool("WEEB_PRETTY", true))
+	return emitResult(res, false, false, envBool("WEEB_PRETTY", true), false)
 }
 
 // emitResult writes one finished request per the output matrix: body to stdout
@@ -303,7 +306,7 @@ func runCurlImport(args []string) int {
 // Everything goes through outW/errW: at a TTY that boundary sanitizes the
 // server-influenced text (body, TLS leaf name, error strings); piped output
 // is the writer itself, so pipes still get the exact server bytes.
-func emitResult(res Result, wantStats, quiet, pretty bool) int {
+func emitResult(res Result, wantStats, quiet, pretty, include bool) int {
 	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
 
 	if !quiet && (color || wantStats) && res.Status != 0 {
@@ -313,6 +316,19 @@ func emitResult(res Result, wantStats, quiet, pretty bool) int {
 			fmt.Fprintln(errW, renderConnTLS(res.TLS, st))
 		}
 		fmt.Fprintln(errW, renderTiming(res.Timing, st, 50))
+	}
+
+	// -i/--include: the status line and response headers go to stdout before
+	// the body, like curl -i. Header values are server-controlled; outW strips
+	// hostile control sequences at a TTY.
+	if include && res.Status != 0 {
+		fmt.Fprintf(outW, "%s %d %s\n", res.Proto, res.Status, res.StatusText)
+		for _, k := range sortedHeaderKeys(res.Headers) {
+			for _, v := range res.Headers[k] {
+				fmt.Fprintf(outW, "%s: %s\n", k, v)
+			}
+		}
+		fmt.Fprintln(outW)
 	}
 
 	// A streamed body (BodySink) was already written by Do and leaves
@@ -595,6 +611,9 @@ func parseCLI(args []string) (cliArgs, error) {
 		case arg == "-q" || arg == "--quiet":
 			a.quiet = true
 
+		case arg == "-i" || arg == "--include":
+			a.include = true
+
 		case arg == "--persona":
 			val, err := nextArg(args, &i, arg)
 			if err != nil {
@@ -734,6 +753,9 @@ OPTIONS
                         sent, no reformatting or color (implies --no-tui)
       --no-tui          run a headless one-shot even at a terminal (alias --headless)
   -q, --quiet           headless, body only — suppress the stats block (errors still show)
+  -i, --include         print the status line and response headers on stdout before
+                        the body, like curl -i (implies headless; when piped the body
+                        buffers so headers come first, so the --max-body cap applies)
       --persona MODE    error voice: plain (default) | dere | tsun | yan
                         (overrides WEEB_PERSONA for this run)
       --to-curl         print the curl equivalent of the request, don't send
