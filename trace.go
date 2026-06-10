@@ -100,7 +100,7 @@ func tlsSummary(state *tls.ConnectionState) *connTLS {
 		return nil
 	}
 	c := &connTLS{
-		Version: tlsVersionName(state.Version),
+		Version: tls.VersionName(state.Version),
 		Cipher:  tls.CipherSuiteName(state.CipherSuite),
 		ALPN:    state.NegotiatedProtocol,
 	}

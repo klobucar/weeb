@@ -483,12 +483,10 @@ func terminalWidth() int {
 }
 
 // stdoutIsTTY reports whether stdout is a terminal (not a pipe or file).
+// x/term's check is platform-aware — on Windows a real console is detected
+// properly, where the old Stat/ModeCharDevice idiom can mislead.
 func stdoutIsTTY() bool {
-	fi, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(os.Stdout.Fd())
 }
 
 // parseCLI parses curl-flavoured args:

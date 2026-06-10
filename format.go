@@ -222,14 +222,24 @@ func renderMarkdown(body []byte, width int) (string, error) {
 	return strings.Trim(out, "\n"), nil
 }
 
-// prettyXML reindents XML/HTML using a tokenizer. It is lenient (HTML autoclose
-// and entities) so it survives most real-world HTML; it returns ok=false if the
-// input can't be tokenized, so the caller can fall back to raw.
-func prettyXML(body []byte) (string, bool) {
+// lenientXMLDecoder builds the decoder shared by the flat pretty-print and the
+// fold tree. The leniency knobs here define which real-world documents weeb
+// accepts — keeping them in one place keeps the two render paths agreeing on
+// what parses (a tweak applied to only one would make the same response render
+// in one mode and fall back to raw in the other).
+func lenientXMLDecoder(body []byte) *xml.Decoder {
 	dec := xml.NewDecoder(bytes.NewReader(body))
 	dec.Strict = false
 	dec.AutoClose = xml.HTMLAutoClose
 	dec.Entity = xml.HTMLEntity
+	return dec
+}
+
+// prettyXML reindents XML/HTML using a tokenizer. It is lenient (HTML autoclose
+// and entities) so it survives most real-world HTML; it returns ok=false if the
+// input can't be tokenized, so the caller can fall back to raw.
+func prettyXML(body []byte) (string, bool) {
+	dec := lenientXMLDecoder(body)
 
 	var out bytes.Buffer
 	enc := xml.NewEncoder(&out)

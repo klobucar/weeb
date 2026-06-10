@@ -134,7 +134,7 @@ func fetchCertReport(target string, opts certOptions) (*certReport, error) {
 		Port:       port,
 		SNI:        serverName,
 		StartTLS:   opts.startTLS,
-		TLSVersion: tlsVersionName(state.Version),
+		TLSVersion: tls.VersionName(state.Version),
 		Cipher:     tls.CipherSuiteName(state.CipherSuite),
 		ALPN:       state.NegotiatedProtocol,
 	}
@@ -350,9 +350,15 @@ func describeCert(c *x509.Certificate) certInfo {
 
 func fingerprintSHA256(raw []byte) string {
 	sum := sha256.Sum256(raw)
-	parts := make([]string, len(sum))
-	for i, b := range sum {
-		parts[i] = fmt.Sprintf("%02X", b)
+	return colonHex(sum[:])
+}
+
+// colonHex renders bytes as colon-separated uppercase hex pairs — the shared
+// display form for fingerprints and serial numbers.
+func colonHex(b []byte) string {
+	parts := make([]string, len(b))
+	for i, x := range b {
+		parts[i] = fmt.Sprintf("%02X", x)
 	}
 	return strings.Join(parts, ":")
 }
@@ -396,26 +402,7 @@ func formatSerial(n *big.Int) string {
 	if len(b) == 0 {
 		return "0"
 	}
-	parts := make([]string, len(b))
-	for i, x := range b {
-		parts[i] = fmt.Sprintf("%02X", x)
-	}
-	return strings.Join(parts, ":")
-}
-
-func tlsVersionName(v uint16) string {
-	switch v {
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	default:
-		return fmt.Sprintf("0x%04x", v)
-	}
+	return colonHex(b)
 }
 
 // splitHostPort extracts host and port from a URL, a host:port, or a bare host,

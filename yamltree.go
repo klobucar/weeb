@@ -110,13 +110,7 @@ func yamlScalar(n *yaml.Node) string {
 func (n *ynode) foldable() bool   { return n.kind != yScalar && len(n.children) > 0 }
 func (n *ynode) getFolded() bool  { return n.folded }
 func (n *ynode) setFolded(v bool) { n.folded = v }
-func (n *ynode) kids() []foldNode {
-	out := make([]foldNode, len(n.children))
-	for i, c := range n.children {
-		out[i] = c
-	}
-	return out
-}
+func (n *ynode) kids() []foldNode { return asFoldNodes(n.children) }
 
 // ---- rendering -------------------------------------------------------------
 

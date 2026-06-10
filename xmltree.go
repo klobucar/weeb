@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -40,10 +39,7 @@ func parseXMLTree(body []byte, contentType, url string, sniff bool) *xnode {
 	if f := detectFormat(contentType, url, body, sniff); f != fmtXML && f != fmtHTML {
 		return nil
 	}
-	dec := xml.NewDecoder(bytes.NewReader(body))
-	dec.Strict = false
-	dec.AutoClose = xml.HTMLAutoClose
-	dec.Entity = xml.HTMLEntity
+	dec := lenientXMLDecoder(body)
 
 	root := &xnode{kind: xElem}
 	stack := []*xnode{root}
@@ -97,13 +93,7 @@ func (n *xnode) foldable() bool {
 
 func (n *xnode) getFolded() bool  { return n.folded }
 func (n *xnode) setFolded(v bool) { n.folded = v }
-func (n *xnode) kids() []foldNode {
-	out := make([]foldNode, len(n.children))
-	for i, c := range n.children {
-		out[i] = c
-	}
-	return out
-}
+func (n *xnode) kids() []foldNode { return asFoldNodes(n.children) }
 
 func (n *xnode) elemCount() int {
 	c := 0

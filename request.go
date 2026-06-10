@@ -127,7 +127,6 @@ type Result struct {
 	Body        []byte
 	BodySize    int64
 	ContentType string
-	Duration    time.Duration
 	Timing      Timing
 	TLS         *connTLS
 	DisplayErr  string
@@ -244,7 +243,7 @@ func (c *Client) Do(spec RequestSpec) Result {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		dur := time.Since(start)
-		res.Duration = dur
+		res.Timing.Total = dur // no trace events fired; record the wall time at least
 		rlog.Error("request failed",
 			"kind", KindTransport.String(), "duration_ms", dur.Milliseconds(), "err", err)
 		res.Err = err
@@ -272,7 +271,6 @@ func (c *Client) Do(spec RequestSpec) Result {
 	done := time.Now()
 	dur := done.Sub(start)
 
-	res.Duration = dur
 	res.Timing = tr.timing(done)
 	res.TLS = tlsSummary(resp.TLS)
 	res.Status = resp.StatusCode
