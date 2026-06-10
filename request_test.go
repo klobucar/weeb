@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	log "charm.land/log/v2"
@@ -154,6 +157,144 @@ func TestClientDoSendsMethodHeadersBody(t *testing.T) {
 	}
 	if string(gotBody) != "payload" {
 		t.Errorf("server saw body %q, want payload", gotBody)
+	}
+}
+
+// An over-limit body must not be buffered unboundedly: the read is capped,
+// the kept prefix is surfaced, and the truncation is reported as an error.
+func TestClientDoCapsBodySize(t *testing.T) {
+	old := maxBodyBytes
+	maxBodyBytes = 1024
+	t.Cleanup(func() { maxBodyBytes = old })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 4096))
+	}))
+	defer srv.Close()
+
+	res := testClient().Do(RequestSpec{Method: "GET", URL: srv.URL})
+
+	if int64(len(res.Body)) != maxBodyBytes {
+		t.Errorf("body length = %d, want capped at %d", len(res.Body), maxBodyBytes)
+	}
+	if res.Err == nil || res.DisplayErr == "" {
+		t.Error("an over-limit body should surface a read error on both seams")
+	}
+
+	// An exactly-at-limit body passes untouched.
+	exact := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 1024))
+	}))
+	defer exact.Close()
+	if res := testClient().Do(RequestSpec{Method: "GET", URL: exact.URL}); !res.OK() || len(res.Body) != 1024 {
+		t.Errorf("at-limit body should succeed: err=%v len=%d", res.Err, len(res.Body))
+	}
+}
+
+// A BodySink streams the body uncapped — maxBodyBytes protects only buffered
+// bodies weeb has to hold in memory to render.
+func TestClientDoStreamsToSinkUncapped(t *testing.T) {
+	old := maxBodyBytes
+	maxBodyBytes = 1024
+	t.Cleanup(func() { maxBodyBytes = old })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 4096))
+	}))
+	defer srv.Close()
+
+	var sink bytes.Buffer
+	res := testClient().Do(RequestSpec{Method: "GET", URL: srv.URL, BodySink: &sink})
+
+	if !res.OK() {
+		t.Fatalf("streamed request failed: %v", res.Err)
+	}
+	if sink.Len() != 4096 {
+		t.Errorf("sink got %d bytes, want all 4096 (cap must not apply)", sink.Len())
+	}
+	if len(res.Body) != 0 {
+		t.Errorf("streamed body should not also be buffered, got %d bytes", len(res.Body))
+	}
+	if res.BodySize != 4096 {
+		t.Errorf("BodySize = %d, want 4096", res.BodySize)
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	good := map[string]int64{
+		"1048576": 1 << 20,
+		"64m":     64 << 20,
+		"1G":      1 << 30,
+		"512KiB":  512 << 10,
+		"2kb":     2 << 10,
+		"100b":    100,
+		"0":       0,
+	}
+	for in, want := range good {
+		if got, err := parseSize(in); err != nil || got != want {
+			t.Errorf("parseSize(%q) = (%d, %v), want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "abc", "-1", "12q", "9999999999g"} {
+		if _, err := parseSize(in); err == nil {
+			t.Errorf("parseSize(%q) should error", in)
+		}
+	}
+}
+
+func TestApplyMaxBody(t *testing.T) {
+	old := maxBodyBytes
+	t.Cleanup(func() { maxBodyBytes = old })
+
+	// Default stands when neither flag nor env is set.
+	t.Setenv("WEEB_MAX_BODY", "")
+	maxBodyBytes = old
+	if err := applyMaxBody(""); err != nil || maxBodyBytes != old {
+		t.Errorf("no overrides: cap = %d, err = %v; want default %d", maxBodyBytes, err, old)
+	}
+
+	// Env applies; flag wins over env.
+	t.Setenv("WEEB_MAX_BODY", "1m")
+	if err := applyMaxBody(""); err != nil || maxBodyBytes != 1<<20 {
+		t.Errorf("env: cap = %d, err = %v; want 1MiB", maxBodyBytes, err)
+	}
+	if err := applyMaxBody("2m"); err != nil || maxBodyBytes != 2<<20 {
+		t.Errorf("flag should beat env: cap = %d, err = %v; want 2MiB", maxBodyBytes, err)
+	}
+
+	// 0 disables the cap.
+	if err := applyMaxBody("0"); err != nil || maxBodyBytes != 1<<62 {
+		t.Errorf("0: cap = %d, err = %v; want uncapped", maxBodyBytes, err)
+	}
+
+	if err := applyMaxBody("nope"); err == nil {
+		t.Error("bad size should error")
+	}
+}
+
+// -o streams the body to a file, uncapped, with a zero exit.
+func TestRunCLIOutputFile(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "")
+	t.Setenv("WEEB_TOKEN", "")
+	t.Setenv("WEEB_MAX_BODY", "")
+
+	payload := bytes.Repeat([]byte("weeb"), 1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "body.bin")
+	if code := runCLI(cliArgs{method: "GET", url: srv.URL, output: out}); code != 0 {
+		t.Fatalf("runCLI exit = %d, want 0", code)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("output file has %d bytes, want %d", len(got), len(payload))
 	}
 }
 

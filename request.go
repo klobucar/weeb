@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,71 @@ import (
 )
 
 const defaultTimeout = 30 * time.Second
+
+// maxBodyBytes caps how much of a response body is buffered. Everything weeb
+// does with a body (pretty-print, tree views, TUI render) needs it in memory,
+// so an unbounded read would let a hostile or runaway server stream gigabytes
+// within the timeout window and OOM the process. A var so tests can lower it
+// and applyMaxBody can override it (--max-body / WEEB_MAX_BODY). Bodies
+// streamed to a BodySink are never capped.
+var maxBodyBytes int64 = 64 << 20 // 64 MiB
+
+// applyMaxBody sets the buffered-body cap: the --max-body flag value wins,
+// then WEEB_MAX_BODY, then the 64 MiB default stands. A value of 0 disables
+// the cap entirely.
+func applyMaxBody(flag string) error {
+	src := flag
+	if src == "" {
+		src = os.Getenv("WEEB_MAX_BODY")
+	}
+	if src == "" {
+		return nil
+	}
+	n, err := parseSize(src)
+	if err != nil {
+		return fmt.Errorf("bad body size limit %q (bytes, or k/m/g suffix, e.g. 256m; 0 = no cap)", src)
+	}
+	if n == 0 {
+		n = 1 << 62 // effectively uncapped, without overflowing the +1 probe read
+	}
+	maxBodyBytes = n
+	return nil
+}
+
+// parseSize parses a human byte size: a plain integer is bytes; k/m/g
+// suffixes are binary multiples, case-insensitive, with b/ib tolerated
+// ("64m", "1G", "512KiB", "1048576").
+func parseSize(s string) (int64, error) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	num, mult := t, int64(1)
+	switch {
+	case strings.HasSuffix(t, "kib"):
+		num, mult = t[:len(t)-3], 1<<10
+	case strings.HasSuffix(t, "mib"):
+		num, mult = t[:len(t)-3], 1<<20
+	case strings.HasSuffix(t, "gib"):
+		num, mult = t[:len(t)-3], 1<<30
+	case strings.HasSuffix(t, "kb"):
+		num, mult = t[:len(t)-2], 1<<10
+	case strings.HasSuffix(t, "mb"):
+		num, mult = t[:len(t)-2], 1<<20
+	case strings.HasSuffix(t, "gb"):
+		num, mult = t[:len(t)-2], 1<<30
+	case strings.HasSuffix(t, "k"):
+		num, mult = t[:len(t)-1], 1<<10
+	case strings.HasSuffix(t, "m"):
+		num, mult = t[:len(t)-1], 1<<20
+	case strings.HasSuffix(t, "g"):
+		num, mult = t[:len(t)-1], 1<<30
+	case strings.HasSuffix(t, "b"):
+		num = t[:len(t)-1]
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(num), 10, 64)
+	if err != nil || n < 0 || n > (1<<62)/mult {
+		return 0, fmt.Errorf("bad size %q", s)
+	}
+	return n * mult, nil
+}
 
 // Header is a single request header row.
 type Header struct {
@@ -37,12 +103,20 @@ type RequestSpec struct {
 	// who may have deliberately removed them, so resolveSpec must not add
 	// them back. The TUI form sets this; one-shot CLI specs leave it false.
 	HeadersResolved bool
+
+	// BodySink, when non-nil, receives the response body as it arrives
+	// instead of it being buffered into Result.Body. Streaming bypasses
+	// maxBodyBytes — the caller owns the destination (a pipe, a file), so
+	// memory stays constant no matter the size, like curl.
+	BodySink io.Writer
 }
 
 // Result is the outcome of handling one request. Body always holds the raw
-// response bytes (even for 4xx/5xx). DisplayErr, when non-empty, is the
-// human-facing weeb error string produced by the ErrorChan seam. Err is the
-// underlying Go error used for CLI exit codes; it is nil on a 2xx/3xx success.
+// response bytes (even for 4xx/5xx) — except when the spec carried a BodySink,
+// which received them instead; BodySize counts the bytes either way.
+// DisplayErr, when non-empty, is the human-facing weeb error string produced
+// by the ErrorChan seam. Err is the underlying Go error used for CLI exit
+// codes; it is nil on a 2xx/3xx success.
 type Result struct {
 	Method      string
 	URL         string
@@ -51,6 +125,7 @@ type Result struct {
 	Proto       string
 	Headers     http.Header
 	Body        []byte
+	BodySize    int64
 	ContentType string
 	Duration    time.Duration
 	Timing      Timing
@@ -61,6 +136,16 @@ type Result struct {
 
 // OK reports whether the request fully succeeded (sent, received, status < 400).
 func (r Result) OK() bool { return r.Err == nil }
+
+// bodySize is the response size in bytes, valid both for buffered bodies and
+// for ones streamed to a BodySink (where Body itself stays empty). The len
+// fallback keeps hand-built Results (tests, TUI fixtures) honest.
+func (r Result) bodySize() int64 {
+	if r.BodySize != 0 {
+		return r.BodySize
+	}
+	return int64(len(r.Body))
+}
 
 // Client is the single component that executes requests and handles their
 // results. Construct it once per process with the chosen logger and ErrorChan.
@@ -168,7 +253,22 @@ func (c *Client) Do(spec RequestSpec) Result {
 	}
 	defer resp.Body.Close()
 
-	body, readErr := io.ReadAll(resp.Body)
+	var body []byte
+	var bodySize int64
+	var readErr error
+	if spec.BodySink != nil {
+		// Streaming: bytes go to the sink as they arrive, uncapped — the
+		// caller owns the destination, memory stays constant.
+		bodySize, readErr = io.Copy(spec.BodySink, resp.Body)
+	} else {
+		body, readErr = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+		if readErr == nil && int64(len(body)) > maxBodyBytes {
+			body = body[:maxBodyBytes]
+			readErr = fmt.Errorf("response body exceeds %d MiB; keeping the first %d MiB",
+				maxBodyBytes>>20, maxBodyBytes>>20)
+		}
+		bodySize = int64(len(body))
+	}
 	done := time.Now()
 	dur := done.Sub(start)
 
@@ -181,6 +281,7 @@ func (c *Client) Do(spec RequestSpec) Result {
 	res.Headers = resp.Header
 	res.ContentType = resp.Header.Get("Content-Type")
 	res.Body = body
+	res.BodySize = bodySize
 
 	if readErr != nil {
 		rlog.Error("request failed",
@@ -192,7 +293,7 @@ func (c *Client) Do(spec RequestSpec) Result {
 	}
 
 	rlog.Info("response",
-		"status", resp.StatusCode, "duration_ms", dur.Milliseconds(), "bytes", len(body),
+		"status", resp.StatusCode, "duration_ms", dur.Milliseconds(), "bytes", bodySize,
 		"dns_ms", res.Timing.DNS.Milliseconds(), "tcp_ms", res.Timing.TCP.Milliseconds(),
 		"tls_ms", res.Timing.TLS.Milliseconds(), "send_ms", res.Timing.Send.Milliseconds(),
 		"server_ms", res.Timing.Server.Milliseconds(),
