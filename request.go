@@ -31,6 +31,12 @@ type RequestSpec struct {
 	URL     string
 	Headers []Header
 	Body    []byte
+
+	// HeadersResolved marks Headers as the user's final say: env header
+	// prefills (WEEB_HEADERS/WEEB_TOKEN) were already surfaced to the user,
+	// who may have deliberately removed them, so resolveSpec must not add
+	// them back. The TUI form sets this; one-shot CLI specs leave it false.
+	HeadersResolved bool
 }
 
 // Result is the outcome of handling one request. Body always holds the raw
@@ -162,6 +168,10 @@ func (c *Client) Do(spec RequestSpec) Result {
 //	WEEB_HEADERS  : default headers ("K:V;K2:V2"), added only if absent
 //	WEEB_TOKEN    : "Authorization: Bearer $WEEB_TOKEN" unless an Authorization
 //	                header is already present
+//
+// Header prefills are skipped when spec.HeadersResolved is set — the user has
+// already seen (and possibly deleted) them in the form, and a deleted auth
+// header must stay deleted. URL resolution always applies.
 func resolveSpec(spec RequestSpec) RequestSpec {
 	if base := envOr("WEEB_BASE_URL", ""); base != "" {
 		if u := strings.TrimSpace(spec.URL); u != "" && !hasScheme(u) {
@@ -174,6 +184,10 @@ func resolveSpec(spec RequestSpec) RequestSpec {
 	// leading-slash guard leaves a bare relative path alone for WEEB_BASE_URL.
 	if u := strings.TrimSpace(spec.URL); u != "" && !hasScheme(u) && !strings.HasPrefix(u, "/") {
 		spec.URL = "http://" + u
+	}
+
+	if spec.HeadersResolved {
+		return spec
 	}
 
 	have := map[string]bool{}
