@@ -137,7 +137,7 @@ func runTUI(seed *cliArgs) int {
 
 	client := newClient(logger, voice)
 	if seed != nil && seed.timeout > 0 {
-		client.http.Timeout = seed.timeout
+		client.SetTimeout(seed.timeout)
 	}
 
 	m := newModel(client, logger, dbg)
@@ -222,7 +222,7 @@ func runCLI(a cliArgs) int {
 
 	client := newClient(logger, errorChanFor(persona))
 	if a.timeout > 0 {
-		client.http.Timeout = a.timeout
+		client.SetTimeout(a.timeout)
 	}
 
 	// Stream the body when it isn't being rendered: to -o FILE when asked, or
@@ -724,7 +724,10 @@ OPTIONS
                           string  a literal body
                         (if -d is omitted and stdin is piped, the pipe is the body)
   -X, --request METHOD  set the method explicitly
-      --timeout DUR     request timeout, e.g. 10s, 500ms (default 30s)
+      --timeout DUR     request timeout, e.g. 10s, 500ms (default 30s). For
+                        streamed bodies (-o / piped) the default bounds the wait
+                        for headers, not the transfer; an explicit --timeout
+                        caps the whole transfer
   -v, --stats           print a timing breakdown (dns/tcp/tls/send/wait/recv) and
                         the negotiated TLS to stderr, even when piping
       --pretty          force the pretty/colored body view (the default at a TTY:
