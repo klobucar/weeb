@@ -418,10 +418,11 @@ func joinURL(base, rel string) string {
 }
 
 // parseHeaderList parses a "K:V;K2:V2" string into headers, tolerating spaces
-// and empty segments.
+// and empty segments. A backslash escapes the separator, so "\;" yields a
+// literal semicolon inside a value and "\\" a literal backslash.
 func parseHeaderList(s string) []Header {
 	var out []Header
-	for _, part := range strings.Split(s, ";") {
+	for _, part := range splitHeaderSegments(s) {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -433,6 +434,26 @@ func parseHeaderList(s string) []Header {
 		out = append(out, Header{Key: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
 	}
 	return out
+}
+
+// splitHeaderSegments splits s on unescaped ';', unescaping "\;" and "\\"
+// within each segment. Any other backslash passes through unchanged.
+func splitHeaderSegments(s string) []string {
+	var segs []string
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\\' && i+1 < len(s) && (s[i+1] == ';' || s[i+1] == '\\'):
+			b.WriteByte(s[i+1])
+			i++
+		case c == ';':
+			segs = append(segs, b.String())
+			b.Reset()
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return append(segs, b.String())
 }
 
 // prettyBody pretty-prints the body when it looks like JSON, otherwise returns

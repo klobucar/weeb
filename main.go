@@ -786,7 +786,8 @@ TUI KEYS
 
 ENVIRONMENT (prefills, applied unless you override them)
   WEEB_BASE_URL    relative URLs ("/me") resolve against this base
-  WEEB_HEADERS     default headers on every request, "K:V;K2:V2"
+  WEEB_HEADERS     default headers on every request, "K:V;K2:V2" (\; escapes a
+                   semicolon inside a value, \\ a backslash)
   WEEB_TOKEN       adds "Authorization: Bearer $WEEB_TOKEN" unless you set Authorization
   WEEB_PERSONA     error voice: plain (default) | dere | tsun | yan
   WEEB_RAINBOW     1/true to launch the TUI in 🌈 mode (toggle live with ctrl+y)
