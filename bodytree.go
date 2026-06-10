@@ -22,7 +22,8 @@ const (
 // token text. The tree is what structural folding operates on: each non-empty
 // container is an independently collapsible node.
 type bnode struct {
-	key      string // object-member key (raw, unquoted); "" for array elements / root
+	key      string // object-member key (raw, unquoted); meaningful only when hasKey
+	hasKey   bool   // distinguishes a real (possibly empty) object key from array elements / root
 	kind     bKind
 	scalar   string // formatted token for scalars, e.g. `"hi"`, `42`, `true`, `null`
 	children []*bnode
@@ -38,7 +39,7 @@ func parseJSONTree(body []byte, contentType, url string, sniff bool) *bnode {
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
-	root, err := parseValue(dec, "")
+	root, err := parseValue(dec, "", false)
 	if err != nil {
 		return nil
 	}
@@ -49,7 +50,7 @@ func parseJSONTree(body []byte, contentType, url string, sniff bool) *bnode {
 	return root
 }
 
-func parseValue(dec *json.Decoder, key string) (*bnode, error) {
+func parseValue(dec *json.Decoder, key string, hasKey bool) (*bnode, error) {
 	tok, err := dec.Token()
 	if err != nil {
 		return nil, err
@@ -57,7 +58,7 @@ func parseValue(dec *json.Decoder, key string) (*bnode, error) {
 	if d, ok := tok.(json.Delim); ok {
 		switch d {
 		case '{':
-			n := &bnode{kind: bObject, key: key}
+			n := &bnode{kind: bObject, key: key, hasKey: hasKey}
 			for dec.More() {
 				kt, err := dec.Token()
 				if err != nil {
@@ -67,7 +68,7 @@ func parseValue(dec *json.Decoder, key string) (*bnode, error) {
 				if !ok {
 					return nil, fmt.Errorf("weeb: object key was not a string")
 				}
-				child, err := parseValue(dec, k)
+				child, err := parseValue(dec, k, true)
 				if err != nil {
 					return nil, err
 				}
@@ -78,9 +79,9 @@ func parseValue(dec *json.Decoder, key string) (*bnode, error) {
 			}
 			return n, nil
 		case '[':
-			n := &bnode{kind: bArray, key: key}
+			n := &bnode{kind: bArray, key: key, hasKey: hasKey}
 			for dec.More() {
-				child, err := parseValue(dec, "")
+				child, err := parseValue(dec, "", false)
 				if err != nil {
 					return nil, err
 				}
@@ -93,7 +94,7 @@ func parseValue(dec *json.Decoder, key string) (*bnode, error) {
 		}
 	}
 	// Scalar: re-marshal the token so the formatting matches the original kind.
-	return &bnode{kind: bScalar, key: key, scalar: jsonToken(tok)}, nil
+	return &bnode{kind: bScalar, key: key, hasKey: hasKey, scalar: jsonToken(tok)}, nil
 }
 
 // bnode satisfies foldNode so the shared fold-cursor machinery can walk it.
@@ -133,7 +134,7 @@ func renderNode(n *bnode, depth int, last, isRoot bool, sel foldNode, st styles,
 
 	if n.kind == bScalar {
 		line := indent
-		if n.key != "" {
+		if n.hasKey {
 			line += colorKey(n.key, st) + st.jsonPunct.Render(": ")
 		}
 		line += colorScalar(n.scalar, st) + st.jsonPunct.Render(comma)
@@ -149,7 +150,7 @@ func renderNode(n *bnode, depth int, last, isRoot bool, sel foldNode, st styles,
 	// Empty container: render inline as "{}" / "[]".
 	if len(n.children) == 0 {
 		line := indent
-		if n.key != "" {
+		if n.hasKey {
 			line += colorKey(n.key, st) + st.jsonPunct.Render(": ")
 		}
 		line += st.jsonPunct.Render(open + close + comma)
@@ -163,7 +164,7 @@ func renderNode(n *bnode, depth int, last, isRoot bool, sel foldNode, st styles,
 	if !isRoot && n.folded {
 		if selected {
 			plain := indent
-			if n.key != "" {
+			if n.hasKey {
 				plain += quoteKey(n.key) + ": "
 			}
 			plain += open + "…" + close + comma + "  " + foldCount(n)
@@ -171,7 +172,7 @@ func renderNode(n *bnode, depth int, last, isRoot bool, sel foldNode, st styles,
 			return
 		}
 		line := indent
-		if n.key != "" {
+		if n.hasKey {
 			line += colorKey(n.key, st) + st.jsonPunct.Render(": ")
 		}
 		line += st.jsonPunct.Render(open) + st.jsonNull.Render("…") +
@@ -183,14 +184,14 @@ func renderNode(n *bnode, depth int, last, isRoot bool, sel foldNode, st styles,
 	// Expanded: head line, children, close line.
 	if selected {
 		plain := indent
-		if n.key != "" {
+		if n.hasKey {
 			plain += quoteKey(n.key) + ": "
 		}
 		plain += open
 		*out = append(*out, st.foldSel.Render(plain))
 	} else {
 		head := indent
-		if n.key != "" {
+		if n.hasKey {
 			head += colorKey(n.key, st) + st.jsonPunct.Render(": ")
 		}
 		head += st.jsonPunct.Render(open)
