@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	log "charm.land/log/v2"
 )
@@ -307,6 +308,83 @@ func TestClientDoStreamsToSinkUncapped(t *testing.T) {
 	}
 	if res.BodySize != 4096 {
 		t.Errorf("BodySize = %d, want 4096", res.BodySize)
+	}
+}
+
+// dripServer sends headers immediately, then dribbles the body one byte per
+// sleep, so the full transfer takes chunks*pace — long enough to outlast a
+// tiny client timeout without slowing the test suite down.
+func dripServer(t *testing.T, chunks int, pace time.Duration) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl := w.(http.Flusher)
+		w.WriteHeader(http.StatusOK)
+		fl.Flush()
+		for range chunks {
+			time.Sleep(pace)
+			if _, err := w.Write([]byte("x")); err != nil {
+				return // client gave up (the explicit-timeout case)
+			}
+			fl.Flush()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// The DEFAULT timeout must not cap a streamed body copy: headers arrive
+// instantly, the transfer outlasts the client timeout, and the stream still
+// completes — that's the whole point of the BodySink path (curl -o).
+func TestClientDoStreamDefaultTimeoutDoesNotCapBody(t *testing.T) {
+	srv := dripServer(t, 8, 30*time.Millisecond) // ~240ms transfer
+
+	c := testClient()
+	c.http.Timeout = 50 * time.Millisecond // a tiny "default" timeout
+
+	var sink bytes.Buffer
+	res := c.Do(RequestSpec{Method: "GET", URL: srv.URL, BodySink: &sink})
+
+	if !res.OK() {
+		t.Fatalf("streamed transfer was killed by the default timeout: %v", res.Err)
+	}
+	if sink.Len() != 8 {
+		t.Errorf("sink got %d bytes, want 8", sink.Len())
+	}
+}
+
+// An explicit --timeout is a total cap, so it still kills a too-slow streamed
+// transfer.
+func TestClientDoStreamExplicitTimeoutCapsBody(t *testing.T) {
+	srv := dripServer(t, 8, 30*time.Millisecond)
+
+	c := testClient()
+	c.SetTimeout(50 * time.Millisecond)
+
+	var sink bytes.Buffer
+	res := c.Do(RequestSpec{Method: "GET", URL: srv.URL, BodySink: &sink})
+
+	if res.Err == nil {
+		t.Error("explicit timeout should kill a slow streamed transfer")
+	}
+	if res.DisplayErr == "" {
+		t.Error("DisplayErr should be set when the explicit timeout fires")
+	}
+}
+
+// Buffered (non-sink) requests keep the full-transfer timeout regardless.
+func TestClientDoBufferedTimeoutStillCapsBody(t *testing.T) {
+	srv := dripServer(t, 8, 30*time.Millisecond)
+
+	c := testClient()
+	c.http.Timeout = 50 * time.Millisecond
+
+	res := c.Do(RequestSpec{Method: "GET", URL: srv.URL})
+
+	if res.Err == nil {
+		t.Error("default timeout should still cap a buffered transfer")
+	}
+	if res.DisplayErr == "" {
+		t.Error("DisplayErr should be set when a buffered transfer times out")
 	}
 }
 
