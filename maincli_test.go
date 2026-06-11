@@ -62,7 +62,7 @@ func TestParseCLI(t *testing.T) {
 		a, err := parseCLI([]string{
 			"https://x", "-X", "PUT", "--timeout", "5s",
 			"--raw", "-q", "--no-tui", "--to-curl", "--persona", "tsun", "-v",
-			"-o", "out.bin", "--max-body", "256m",
+			"-o", "out.bin", "--max-body", "256m", "--no-follow",
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -73,7 +73,7 @@ func TestParseCLI(t *testing.T) {
 		if a.timeout.String() != "5s" {
 			t.Errorf("timeout = %v", a.timeout)
 		}
-		if !a.raw || !a.quiet || !a.noTUI || !a.toCurl || !a.stats {
+		if !a.raw || !a.quiet || !a.noTUI || !a.toCurl || !a.stats || !a.noFollow {
 			t.Errorf("flags not all set: %+v", a)
 		}
 		if a.persona != "tsun" {

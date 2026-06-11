@@ -108,9 +108,10 @@ func printVersion(w io.Writer) {
 // than opening the interactive TUI. We go headless when output is shaped for a
 // pipe/script — stdout isn't a terminal, a body is piped into stdin, or the
 // body goes to a file (-o) — or when a flag asks for it (--no-tui, --raw,
-// --to-curl, -i, --check).
+// --to-curl, --no-follow, -i, --check: the TUI form has no redirect toggle, so opening it
+// would silently drop the flag).
 func (a cliArgs) headless() bool {
-	return a.noTUI || a.quiet || a.raw || a.toCurl || a.include || a.check || a.output != "" || !stdoutIsTTY() || stdinIsPiped()
+	return a.noTUI || a.quiet || a.raw || a.toCurl || a.noFollow || a.include || a.check || a.output != "" || !stdoutIsTTY() || stdinIsPiped()
 }
 
 // ---- TUI mode --------------------------------------------------------------
@@ -161,21 +162,22 @@ func runTUI(seed *cliArgs) int {
 // ---- CLI mode --------------------------------------------------------------
 
 type cliArgs struct {
-	method  string
-	url     string
-	headers []Header
-	body    []byte
-	timeout time.Duration
-	stats   bool
-	pretty  bool   // --pretty: force the pretty/colored view on
-	raw     bool   // --raw: force the raw view (server bytes as-is)
-	noTUI   bool   // --no-tui: run headless even at a terminal
-	quiet   bool   // -q/--quiet: headless, and suppress the stats block (body + errors only)
-	include bool   // -i/--include: print the status line + response headers before the body (curl -i)
-	toCurl  bool   // --to-curl: print the curl equivalent instead of sending
-	persona string // --persona: error voice for this run (overrides WEEB_PERSONA)
-	output  string // -o/--output: stream the body to this file (uncapped, like curl -o)
-	maxBody string // --max-body: buffered-body cap, e.g. "256m" (overrides WEEB_MAX_BODY)
+	method   string
+	url      string
+	headers  []Header
+	body     []byte
+	timeout  time.Duration
+	stats    bool
+	pretty   bool   // --pretty: force the pretty/colored view on
+	raw      bool   // --raw: force the raw view (server bytes as-is)
+	noTUI    bool   // --no-tui: run headless even at a terminal
+	quiet    bool   // -q/--quiet: headless, and suppress the stats block (body + errors only)
+	include  bool   // -i/--include: print the status line + response headers before the body (curl -i)
+	toCurl   bool   // --to-curl: print the curl equivalent instead of sending
+	persona  string // --persona: error voice for this run (overrides WEEB_PERSONA)
+	output   string // -o/--output: stream the body to this file (uncapped, like curl -o)
+	maxBody  string // --max-body: buffered-body cap, e.g. "256m" (overrides WEEB_MAX_BODY)
+	noFollow bool   // --no-follow: don't follow redirects, show the 3xx itself
 
 	// Monitoring-plugin mode (see check.go). check replaces the whole output
 	// matrix with one plugin line + a 0/1/2/3 exit; the others only apply with it.
@@ -208,7 +210,7 @@ func (a cliArgs) prettyOn() bool {
 // Color is applied to stdout ONLY when stdout is a terminal, so a pipe always
 // receives the exact raw bytes the server sent (`weeb ... | jq` stays clean).
 func runCLI(a cliArgs) int {
-	spec := RequestSpec{Method: a.method, URL: a.url, Headers: a.headers, Body: a.body}
+	spec := RequestSpec{Method: a.method, URL: a.url, Headers: a.headers, Body: a.body, NoFollow: a.noFollow}
 
 	// --to-curl: export the request (with env prefills resolved, so it's a
 	// faithful reproduction of what weeb would send) instead of sending it.
@@ -345,6 +347,9 @@ func emitResult(res Result, wantStats, quiet, pretty, include bool) int {
 			fmt.Fprintln(errW, renderConnTLS(res.TLS, st))
 		}
 		fmt.Fprintln(errW, renderTiming(res.Timing, st, 50))
+		if len(res.Redirects) > 0 {
+			fmt.Fprintln(errW, renderRedirects(res.Redirects, st))
+		}
 	}
 
 	// -i/--include: the status line and response headers go to stdout before
@@ -702,6 +707,9 @@ func parseCLI(args []string) (cliArgs, error) {
 			}
 			a.maxBody = val
 
+		case arg == "--no-follow":
+			a.noFollow = true
+
 		case arg == "--check" || arg == "--nagios":
 			a.check = true
 
@@ -847,6 +855,9 @@ OPTIONS
                         streamed bodies (-o / piped) the default bounds the wait
                         for headers, not the transfer; an explicit --timeout
                         caps the whole transfer
+      --no-follow       don't follow redirects — show the 3xx response itself
+                        (status, Location header, body); by default weeb follows
+                        up to 10 redirects (implies headless)
   -v, --stats           print a timing breakdown (dns/tcp/tls/send/wait/recv) and
                         the negotiated TLS to stderr, even when piping
       --pretty          force the pretty/colored body view (the default at a TTY:

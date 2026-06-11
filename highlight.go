@@ -177,6 +177,17 @@ func renderConnTLS(c *connTLS, st styles) string {
 	return line
 }
 
+// renderRedirects shows the redirect chain a request followed as one dim line:
+// the original URL, every hop, and the final URL (see Result.Redirects).
+func renderRedirects(redirects []string, st styles) string {
+	noun := "redirects"
+	if len(redirects) == 2 {
+		noun = "redirect"
+	}
+	return st.meta.Render(fmt.Sprintf("↪ %d %s: %s",
+		len(redirects)-1, noun, strings.Join(redirects, " → ")))
+}
+
 // statusBadge renders a colored " 200 OK " badge plus a dim timing/size suffix.
 func statusBadge(r Result, st styles) string {
 	col := statusColor(r.Status)

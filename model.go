@@ -899,6 +899,9 @@ func (m *model) renderResult(r Result) {
 
 	if r.Status != 0 {
 		m.respPreamble = statusBadge(r, m.styles)
+		if len(r.Redirects) > 0 {
+			m.respPreamble += "\n" + renderRedirects(r.Redirects, m.styles)
+		}
 
 		// Connection: negotiated TLS + the per-phase timing breakdown.
 		var conn strings.Builder
