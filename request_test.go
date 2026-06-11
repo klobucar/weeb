@@ -471,3 +471,34 @@ func TestResolveSpecBareHostDefaultsHTTP(t *testing.T) {
 		t.Errorf("https URL should be untouched, got %q", got.URL)
 	}
 }
+
+func TestParseHeaderList(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []Header
+	}{
+		{"empty", "", nil},
+		{"plain multi-header", "A:1;B:2", []Header{{Key: "A", Value: "1"}, {Key: "B", Value: "2"}}},
+		{"trims spaces", " A : 1 ; B : 2 ", []Header{{Key: "A", Value: "1"}, {Key: "B", Value: "2"}}},
+		{"escaped semicolon in value", `A:1\;2;B:3`, []Header{{Key: "A", Value: "1;2"}, {Key: "B", Value: "3"}}},
+		{"literal backslash via double escape", `A:1\\2`, []Header{{Key: "A", Value: `1\2`}}},
+		{"stray backslash passes through", `A:1\2`, []Header{{Key: "A", Value: `1\2`}}},
+		{"trailing and empty segments", "A:1;;B:2;", []Header{{Key: "A", Value: "1"}, {Key: "B", Value: "2"}}},
+		{"colonless segment skipped", "junk;A:1", []Header{{Key: "A", Value: "1"}}},
+		{"accept with q param", `Accept:text/html\;q=0.9`, []Header{{Key: "Accept", Value: "text/html;q=0.9"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseHeaderList(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("parseHeaderList(%q) = %+v, want %+v", tt.in, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("parseHeaderList(%q)[%d] = %+v, want %+v", tt.in, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
