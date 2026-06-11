@@ -165,17 +165,39 @@ func (r Result) bodySize() int64 {
 // Client is the single component that executes requests and handles their
 // results. Construct it once per process with the chosen logger and ErrorChan.
 type Client struct {
-	http  *http.Client
-	log   *log.Logger
-	voice ErrorChan
+	http   *http.Client
+	stream *http.Client // BodySink requests: bounds time-to-headers, not the body copy
+	log    *log.Logger
+	voice  ErrorChan
+
+	// explicitTimeout records that the user passed --timeout. An explicit
+	// value is a total cap, so Do keeps it on streamed transfers too; only
+	// the DEFAULT timeout steps aside for a BodySink.
+	explicitTimeout bool
 }
 
 func newClient(logger *log.Logger, voice ErrorChan) *Client {
+	// http.Client.Timeout covers reading the entire body, which would kill a
+	// streamed download (-o / piped) at 30s mid-transfer — and streaming
+	// exists precisely for arbitrarily large bodies. The stream client moves
+	// the default timeout to the response headers instead (the cloned default
+	// transport already carries a 30s dial timeout) and leaves the body copy
+	// unbounded, like curl -o.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = defaultTimeout
 	return &Client{
-		http:  &http.Client{Timeout: defaultTimeout, CheckRedirect: redirectPolicy},
-		log:   logger,
-		voice: voice,
+		http:   &http.Client{Timeout: defaultTimeout, CheckRedirect: redirectPolicy},
+		stream: &http.Client{Transport: tr, CheckRedirect: redirectPolicy},
+		log:    logger,
+		voice:  voice,
 	}
+}
+
+// SetTimeout applies a user-supplied --timeout. Explicit means "cap the whole
+// request", so unlike the default it also bounds streamed (BodySink) transfers.
+func (c *Client) SetTimeout(d time.Duration) {
+	c.http.Timeout = d
+	c.explicitTimeout = true
 }
 
 // noFollowKey and redirectChainKey are unexported request-context keys. The
@@ -297,9 +319,16 @@ func (c *Client) Do(spec RequestSpec) Result {
 	tr := &reqTrace{}
 	req = req.WithContext(httptrace.WithClientTrace(ctx, tr.clientTrace()))
 
+	// Streaming with the default timeout: bound the wait for headers, never
+	// the body copy. An explicit --timeout keeps the total cap even here.
+	httpc := c.http
+	if spec.BodySink != nil && !c.explicitTimeout {
+		httpc = c.stream
+	}
+
 	start := time.Now()
 	tr.start = start
-	resp, err := c.http.Do(req)
+	resp, err := httpc.Do(req)
 	if err != nil {
 		dur := time.Since(start)
 		res.Timing.Total = dur // no trace events fired; record the wall time at least
