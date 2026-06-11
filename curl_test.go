@@ -102,7 +102,6 @@ func TestParseCurlUnknownFlag(t *testing.T) {
 	}
 	// Unknown flags error instead of eating the URL.
 	for _, argv := range [][]string{
-		{"curl", "-F", "file=@x.png", "https://x"},
 		{"curl", "--doesnotexist", "https://x"},
 		{"curl", "-sSLZ", "https://x"}, // cluster with an unknown letter
 	} {
@@ -147,6 +146,73 @@ func TestParseCurlMultipleData(t *testing.T) {
 	s, _ := parseCurl([]string{"curl", "https://x", "-d", "a=1", "-d", "b=2"})
 	if string(s.Body) != "a=1&b=2" {
 		t.Errorf("joined body = %q, want a=1&b=2", s.Body)
+	}
+}
+
+// curl's empty-value header syntax: "X-Empty;" sends the header with an empty
+// value, and "X-Name:" means don't send the header at all. The importer used
+// to drop "X-Empty;" silently (no colon to Cut on) and send "X-Name:" with an
+// empty value.
+func TestParseCurlEmptyValueHeaders(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []Header
+	}{
+		{"trailing ; sends an empty value", "X-Empty;", []Header{{Key: "X-Empty", Value: ""}}},
+		{"trailing : drops the header", "X-Gone:", nil},
+		{"trailing : with only spaces drops the header", "X-Gone:   ", nil},
+		{"normal header unchanged", "X-Keep: v", []Header{{Key: "X-Keep", Value: "v"}}},
+	}
+	for _, c := range cases {
+		s, err := parseCurl([]string{"curl", "-H", c.in, "https://x"})
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if !reflect.DeepEqual(s.Headers, c.want) {
+			t.Errorf("%s: headers = %+v, want %+v", c.name, s.Headers, c.want)
+		}
+	}
+}
+
+// curl strips CR and LF from -d/--data/--data-ascii @file content; only
+// --data-binary keeps the bytes as-is. The importer used to keep newlines
+// for all of them.
+func TestParseCurlDataFileNewlines(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "payload.txt")
+	if err := os.WriteFile(f, []byte("a=1\r\nb=2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ flag, want string }{
+		{"-d", "a=1b=2"},
+		{"--data", "a=1b=2"},
+		{"--data-ascii", "a=1b=2"},
+		{"--data-binary", "a=1\r\nb=2\n"},
+	}
+	for _, c := range cases {
+		s, err := parseCurl([]string{"curl", "https://x", c.flag, "@" + f})
+		if err != nil {
+			t.Fatalf("%s: %v", c.flag, err)
+		}
+		if string(s.Body) != c.want {
+			t.Errorf("%s: body = %q, want %q", c.flag, s.Body, c.want)
+		}
+	}
+}
+
+// -F/--form gets a dedicated error pointing at --data instead of the generic
+// "unsupported flag", and errors immediately so its value can't be mistaken
+// for the URL.
+func TestParseCurlFormUnsupported(t *testing.T) {
+	for _, argv := range [][]string{
+		{"curl", "-F", "a=b", "https://x"},
+		{"curl", "--form", "a=b", "https://x"},
+		{"curl", "--form-string", "a=b", "https://x"},
+	} {
+		_, err := parseCurl(argv)
+		if err == nil || !strings.Contains(err.Error(), "multipart") || !strings.Contains(err.Error(), "--data") {
+			t.Errorf("parseCurl(%v) err = %v, want the multipart/--data hint", argv, err)
+		}
 	}
 }
 
@@ -201,6 +267,35 @@ func TestParseCurlDataURLEncode(t *testing.T) {
 		}
 		if s.URL != "https://x?a=1&q=b%20c" {
 			t.Errorf("url = %q, want https://x?a=1&q=b%%20c", s.URL)
+		}
+	})
+}
+
+// -d @- is curl's "read the body from stdin", not a file named "-"; treating
+// it as a file made every imported `curl -d @-` command error.
+func TestParseCurlDataFromStdin(t *testing.T) {
+	t.Run("-d @- reads stdin", func(t *testing.T) {
+		pipeStdin(t, "piped body")
+		s, err := parseCurl([]string{"curl", "https://x", "-d", "@-"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(s.Body) != "piped body" {
+			t.Errorf("body = %q, want %q", s.Body, "piped body")
+		}
+		if s.Method != "POST" {
+			t.Errorf("method = %q, want POST", s.Method)
+		}
+	})
+
+	t.Run("--data-urlencode @- encodes stdin", func(t *testing.T) {
+		pipeStdin(t, "a b&c")
+		s, err := parseCurl([]string{"curl", "https://x", "--data-urlencode", "n@-"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "n=a%20b%26c"; string(s.Body) != want {
+			t.Errorf("body = %q, want %q", s.Body, want)
 		}
 	})
 }

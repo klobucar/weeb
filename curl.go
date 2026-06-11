@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -114,6 +115,7 @@ func shellSafe(s string) bool {
 // headers, data, basic auth, user-agent/cookie/referer shortcuts — infers the
 // method (POST when there's a body, HEAD for -I), and silently ignores
 // transfer-only flags like -L/-k/--compressed that don't change the request.
+// -F/--form (multipart) is recognized but unsupported and errors with a hint.
 // Flags it does not recognize are an error: an unknown value-taking flag
 // would otherwise leave its value to be mistaken for the URL.
 func parseCurl(argv []string) (RequestSpec, error) {
@@ -141,7 +143,7 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		// Split an attached short-flag value, e.g. -XPOST or -H'K: V'.
 		flag, attached := arg, ""
 		if len(arg) > 2 && arg[0] == '-' && arg[1] != '-' {
-			if strings.ContainsRune("XHduAbeom", rune(arg[1])) {
+			if strings.ContainsRune("XHduAbeomF", rune(arg[1])) {
 				flag, attached = arg[:2], arg[2:]
 			}
 		}
@@ -160,7 +162,15 @@ func parseCurl(argv []string) (RequestSpec, error) {
 				return spec, err
 			}
 			if k, val, ok := strings.Cut(v, ":"); ok {
-				spec.Headers = append(spec.Headers, Header{Key: strings.TrimSpace(k), Value: strings.TrimSpace(val)})
+				// "X-Name:" (empty value) is curl's "don't send this header".
+				// weeb adds no default headers at this layer, so skipping it
+				// matches the intent.
+				if strings.TrimSpace(val) != "" {
+					spec.Headers = append(spec.Headers, Header{Key: strings.TrimSpace(k), Value: strings.TrimSpace(val)})
+				}
+			} else if name, ok := strings.CutSuffix(strings.TrimSpace(v), ";"); ok {
+				// "X-Empty;" is curl's syntax for a header with an empty value.
+				spec.Headers = append(spec.Headers, Header{Key: strings.TrimSpace(name), Value: ""})
 			}
 
 		case "-d", "--data", "--data-raw", "--data-ascii", "--data-binary", "--data-urlencode":
@@ -176,13 +186,24 @@ func parseCurl(argv []string) (RequestSpec, error) {
 					return spec, err
 				}
 			} else if flag != "--data-raw" && strings.HasPrefix(v, "@") {
-				b, err := os.ReadFile(v[1:])
+				b, err := readDataFile(v[1:])
 				if err != nil {
-					return spec, fmt.Errorf("curl: reading %q: %w", v[1:], err)
+					return spec, err
 				}
 				v = string(b)
+				if flag != "--data-binary" {
+					// curl strips CR and LF from -d/--data/--data-ascii @file
+					// content; only --data-binary keeps the bytes as-is.
+					v = strings.NewReplacer("\r", "", "\n", "").Replace(v)
+				}
 			}
 			data = append(data, v)
+
+		case "-F", "--form", "--form-string":
+			// Recognized but not convertible: multipart bodies have no
+			// RequestSpec shape. Error immediately so the flag's value
+			// isn't mistaken for the URL.
+			return spec, fmt.Errorf("curl: -F/--form (multipart) isn't supported yet — convert the request to a raw --data body if you can")
 
 		case "-u", "--user":
 			v, err := take(&i, flag, attached)
@@ -315,9 +336,9 @@ func urlencodeDataItem(v string) (string, error) {
 		name, v = v[:i], v[i+1:]
 	} else if i := strings.IndexByte(v, '@'); i >= 0 {
 		name, v = v[:i], v[i+1:]
-		b, err := os.ReadFile(v)
+		b, err := readDataFile(v)
 		if err != nil {
-			return "", fmt.Errorf("curl: reading %q: %w", v, err)
+			return "", err
 		}
 		v = string(b)
 	}
@@ -326,6 +347,19 @@ func urlencodeDataItem(v string) (string, error) {
 		return name + "=" + enc, nil
 	}
 	return enc, nil
+}
+
+// readDataFile resolves the file part of a --data @name value the way curl
+// does: '-' reads stdin, anything else reads the named file.
+func readDataFile(name string) ([]byte, error) {
+	if name == "-" {
+		return io.ReadAll(os.Stdin)
+	}
+	b, err := os.ReadFile(name)
+	if err != nil {
+		return nil, fmt.Errorf("curl: reading %q: %w", name, err)
+	}
+	return b, nil
 }
 
 // curlEscape percent-encodes s like curl_easy_escape: every byte outside
