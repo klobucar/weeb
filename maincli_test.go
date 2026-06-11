@@ -134,6 +134,22 @@ func TestParseCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("at-dash body reads stdin and implies POST", func(t *testing.T) {
+		// -d @- is curl's other spelling of "stdin is the body", not a
+		// request to read a file named "-".
+		pipeStdin(t, "piped")
+		a, err := parseCLI([]string{"https://x", "-d", "@-"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(a.body) != "piped" {
+			t.Errorf("-d @- should read stdin, got %q", a.body)
+		}
+		if a.method != "POST" {
+			t.Errorf("method = %q, want POST (-d given)", a.method)
+		}
+	})
+
 	t.Run("no url is allowed (TUI prefill)", func(t *testing.T) {
 		a, err := parseCLI([]string{"--persona", "tsun"})
 		if err != nil {

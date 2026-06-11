@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -185,9 +186,9 @@ func parseCurl(argv []string) (RequestSpec, error) {
 					return spec, err
 				}
 			} else if flag != "--data-raw" && strings.HasPrefix(v, "@") {
-				b, err := os.ReadFile(v[1:])
+				b, err := readDataFile(v[1:])
 				if err != nil {
-					return spec, fmt.Errorf("curl: reading %q: %w", v[1:], err)
+					return spec, err
 				}
 				v = string(b)
 				if flag != "--data-binary" {
@@ -335,9 +336,9 @@ func urlencodeDataItem(v string) (string, error) {
 		name, v = v[:i], v[i+1:]
 	} else if i := strings.IndexByte(v, '@'); i >= 0 {
 		name, v = v[:i], v[i+1:]
-		b, err := os.ReadFile(v)
+		b, err := readDataFile(v)
 		if err != nil {
-			return "", fmt.Errorf("curl: reading %q: %w", v, err)
+			return "", err
 		}
 		v = string(b)
 	}
@@ -346,6 +347,19 @@ func urlencodeDataItem(v string) (string, error) {
 		return name + "=" + enc, nil
 	}
 	return enc, nil
+}
+
+// readDataFile resolves the file part of a --data @name value the way curl
+// does: '-' reads stdin, anything else reads the named file.
+func readDataFile(name string) ([]byte, error) {
+	if name == "-" {
+		return io.ReadAll(os.Stdin)
+	}
+	b, err := os.ReadFile(name)
+	if err != nil {
+		return nil, fmt.Errorf("curl: reading %q: %w", name, err)
+	}
+	return b, nil
 }
 
 // curlEscape percent-encodes s like curl_easy_escape: every byte outside

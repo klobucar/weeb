@@ -271,6 +271,35 @@ func TestParseCurlDataURLEncode(t *testing.T) {
 	})
 }
 
+// -d @- is curl's "read the body from stdin", not a file named "-"; treating
+// it as a file made every imported `curl -d @-` command error.
+func TestParseCurlDataFromStdin(t *testing.T) {
+	t.Run("-d @- reads stdin", func(t *testing.T) {
+		pipeStdin(t, "piped body")
+		s, err := parseCurl([]string{"curl", "https://x", "-d", "@-"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(s.Body) != "piped body" {
+			t.Errorf("body = %q, want %q", s.Body, "piped body")
+		}
+		if s.Method != "POST" {
+			t.Errorf("method = %q, want POST", s.Method)
+		}
+	})
+
+	t.Run("--data-urlencode @- encodes stdin", func(t *testing.T) {
+		pipeStdin(t, "a b&c")
+		s, err := parseCurl([]string{"curl", "https://x", "--data-urlencode", "n@-"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "n=a%20b%26c"; string(s.Body) != want {
+			t.Errorf("body = %q, want %q", s.Body, want)
+		}
+	})
+}
+
 func TestToCurlAndRoundTrip(t *testing.T) {
 	spec := RequestSpec{
 		Method: "POST",
