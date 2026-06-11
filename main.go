@@ -58,6 +58,8 @@ func main() {
 		os.Exit(runCert(args[1:]))
 	case "curl", "import":
 		os.Exit(runCurlImport(args[1:]))
+	case "completion":
+		os.Exit(runCompletion(args[1:], os.Stdout))
 	}
 
 	parsed, err := parseCLI(args)
@@ -708,6 +710,7 @@ USAGE
   weeb [METHOD] URL [opts]   open the TUI prefilled with the request
   weeb cert HOST [opts]      inspect a TLS certificate / chain
   weeb curl '<curl cmd>'     run a pasted curl command (import)
+  weeb completion zsh|bash   print shell completion script
   weeb version               print the build version
 
   METHOD defaults to GET. A URL opens the interactive builder, BUT weeb runs a
@@ -767,6 +770,10 @@ CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
       --persona MODE    error voice for dial failures (see --persona above)
   exit code is non-zero when the chain is untrusted (unless -k) or expired,
   so 'weeb cert' doubles as a cron/monitoring check.
+
+COMPLETION (weeb completion zsh|bash)
+  prints a static tab-completion script — zsh: save it as _weeb in your $fpath;
+  bash: add 'eval "$(weeb completion bash)"' to ~/.bashrc.
 
 EXAMPLES
   weeb GET  https://api.example.com/me
