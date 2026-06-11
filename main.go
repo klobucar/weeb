@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,8 @@ func main() {
 		os.Exit(runCert(args[1:]))
 	case "curl", "import":
 		os.Exit(runCurlImport(args[1:]))
+	case "completion":
+		os.Exit(runCompletion(args[1:], os.Stdout))
 	}
 
 	parsed, err := parseCLI(args)
@@ -105,9 +108,9 @@ func printVersion(w io.Writer) {
 // than opening the interactive TUI. We go headless when output is shaped for a
 // pipe/script — stdout isn't a terminal, a body is piped into stdin, or the
 // body goes to a file (-o) — or when a flag asks for it (--no-tui, --raw,
-// --to-curl).
+// --to-curl, --check).
 func (a cliArgs) headless() bool {
-	return a.noTUI || a.quiet || a.raw || a.toCurl || a.output != "" || !stdoutIsTTY() || stdinIsPiped()
+	return a.noTUI || a.quiet || a.raw || a.toCurl || a.check || a.output != "" || !stdoutIsTTY() || stdinIsPiped()
 }
 
 // ---- TUI mode --------------------------------------------------------------
@@ -172,6 +175,14 @@ type cliArgs struct {
 	persona string // --persona: error voice for this run (overrides WEEB_PERSONA)
 	output  string // -o/--output: stream the body to this file (uncapped, like curl -o)
 	maxBody string // --max-body: buffered-body cap, e.g. "256m" (overrides WEEB_MAX_BODY)
+
+	// Monitoring-plugin mode (see check.go). check replaces the whole output
+	// matrix with one plugin line + a 0/1/2/3 exit; the others only apply with it.
+	check        bool
+	checkJSON    bool          // --json: render the verdict as a JSON object
+	expectStatus string        // --expect-status: statuses that count as OK
+	expectBody   string        // --expect-body: Go regexp the body must match
+	warn, crit   time.Duration // -w/-c: response-time thresholds
 }
 
 // prettyOn resolves the body view: pretty is on by default (and at a TTY), with
@@ -217,6 +228,21 @@ func runCLI(a cliArgs) int {
 		return 2
 	}
 
+	// Monitoring-plugin mode: compile the assertions up front. A bad pattern
+	// or flag combination is a usage error, which in plugin-land is UNKNOWN
+	// on stdout, not weeb's usual stderr/2.
+	var nopts checkHTTPOpts
+	if a.check {
+		o, err := a.checkOpts()
+		if err != nil {
+			return printCheck(outW, newCheckVerdict("http", checkUnknown, checkSafe(err.Error()), "", nil), a.checkJSON)
+		}
+		nopts = o
+	} else if a.expectStatus != "" || a.expectBody != "" || a.warn > 0 || a.crit > 0 || a.checkJSON {
+		fmt.Fprintln(os.Stderr, "weeb: --expect-status/--expect-body/-w/-c/--json only apply with --check")
+		return 2
+	}
+
 	logger, _, cleanup := newLogger(modeCLI)
 	defer cleanup()
 
@@ -229,7 +255,8 @@ func runCLI(a cliArgs) int {
 	// straight to a pipe (which always gets the raw bytes anyway). Constant
 	// memory for arbitrarily large downloads — the 64 MiB cap applies only to
 	// bodies weeb must hold to render — and the first bytes land immediately,
-	// like curl.
+	// like curl. A --check run is the exception: the body must be buffered
+	// for --expect-body, and the only stdout output is the plugin line.
 	var outFile *os.File
 	if a.output != "" {
 		f, err := os.Create(a.output)
@@ -239,11 +266,14 @@ func runCLI(a cliArgs) int {
 		}
 		outFile = f
 		spec.BodySink = f
-	} else if !stdoutIsTTY() {
+	} else if !stdoutIsTTY() && !a.check {
 		spec.BodySink = os.Stdout
 	}
 
 	res := client.Do(spec)
+	if a.check {
+		return printCheck(outW, checkHTTP(res, nopts), a.checkJSON)
+	}
 	code := emitResult(res, a.stats, a.quiet, a.prettyOn())
 	if outFile != nil {
 		if err := outFile.Close(); err != nil {
@@ -353,7 +383,8 @@ func runCert(args []string) int {
 	defer cleanup()
 
 	var target, persona, clientCertPath, clientKeyPath string
-	var insecure, asJSON, asPEM, brief bool
+	var insecure, asJSON, asPEM, brief, checkMode bool
+	warnDays, critDays := 30, 14 // --check expiry thresholds
 	opts := certOptions{timeout: defaultTimeout}
 
 	for i := 0; i < len(args); i++ {
@@ -367,6 +398,24 @@ func runCert(args []string) int {
 			asPEM = true
 		case arg == "--brief" || arg == "--short":
 			brief = true
+		case arg == "--check" || arg == "--nagios":
+			checkMode = true
+		case arg == "-w" || arg == "--warn", arg == "-c" || arg == "--crit":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			n, err := strconv.Atoi(val)
+			if err != nil || n < 0 {
+				fmt.Fprintf(os.Stderr, "weeb: bad %s %q (want days, e.g. 30)\n", arg, val)
+				return 2
+			}
+			if arg == "-w" || arg == "--warn" {
+				warnDays = n
+			} else {
+				critDays = n
+			}
 		case arg == "--sni" || arg == "--servername":
 			val, err := nextArg(args, &i, arg)
 			if err != nil {
@@ -449,6 +498,12 @@ func runCert(args []string) int {
 		fmt.Fprintln(os.Stderr, "weeb: cert needs a host, e.g. 'weeb cert example.com'")
 		return 2
 	}
+	if checkMode && critDays > warnDays {
+		// A usage error in plugin mode is UNKNOWN on stdout, not stderr/2 —
+		// the monitoring system is the one reading.
+		msg := fmt.Sprintf("--crit %d days is above --warn %d days", critDays, warnDays)
+		return printCheck(outW, newCheckVerdict("cert", checkUnknown, msg, "", nil), asJSON)
+	}
 	opts.insecure = insecure
 
 	if (clientCertPath == "") != (clientKeyPath == "") {
@@ -477,12 +532,22 @@ func runCert(args []string) int {
 	rep, err := fetchCertReport(target, opts)
 	if err != nil {
 		rlog.Error("tls inspect failed", "kind", KindTransport.String(), "err", err)
+		if checkMode {
+			// Could not reach the endpoint at all: that's UNKNOWN, not
+			// CRITICAL — the cert state was never observed.
+			return printCheck(outW, newCheckVerdict("cert", checkUnknown, checkSafe(err.Error()), "", nil), asJSON)
+		}
 		fmt.Fprintln(errW, voice.Render(KindTransport, 0, err))
 		return 1
 	}
 	rlog.Info("tls ok",
 		"version", rep.TLSVersion, "verified", rep.Verified, "chain", len(rep.Chain))
 
+	if checkMode {
+		// --json here means the verdict object, not the full report — the
+		// check decides, so the check is what gets serialized.
+		return printCheck(outW, checkCert(rep, warnDays, critDays), asJSON)
+	}
 	if asPEM {
 		fmt.Fprint(outW, certPEM(rep))
 		return certExit(rep, insecure)
@@ -522,8 +587,8 @@ func stdoutIsTTY() bool {
 //	weeb [METHOD] URL [-H "K: V"]... [-d DATA] [--timeout DUR]
 //
 // METHOD is optional (defaults to GET, or POST when a body is present). -d
-// DATA may be @file, '-' (stdin), or a literal string. When -d is omitted and
-// stdin is piped, the pipe is read as the body.
+// DATA may be @file, '-' or '@-' (stdin), or a literal string. When -d is
+// omitted and stdin is piped, the pipe is read as the body.
 func parseCLI(args []string) (cliArgs, error) {
 	a := cliArgs{method: "GET"}
 	methodSet := false
@@ -619,6 +684,41 @@ func parseCLI(args []string) (cliArgs, error) {
 			}
 			a.maxBody = val
 
+		case arg == "--check" || arg == "--nagios":
+			a.check = true
+
+		case arg == "--json":
+			a.checkJSON = true
+
+		case arg == "--expect-status":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.expectStatus = val
+
+		case arg == "--expect-body":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.expectBody = val
+
+		case arg == "-w" || arg == "--warn", arg == "-c" || arg == "--crit":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			d, err := time.ParseDuration(val)
+			if err != nil {
+				return a, fmt.Errorf("bad %s %q: %w", arg, val, err)
+			}
+			if arg == "-w" || arg == "--warn" {
+				a.warn = d
+			} else {
+				a.crit = d
+			}
+
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			return a, fmt.Errorf("unknown flag %q", arg)
 
@@ -673,11 +773,11 @@ func nextArg(args []string, i *int, flag string) (string, error) {
 	return args[*i], nil
 }
 
-// readData resolves a -d value: @file reads a file, '-' reads stdin, anything
-// else is a literal.
+// readData resolves a -d value: @file reads a file, '-' or '@-' reads stdin,
+// anything else is a literal.
 func readData(val string) ([]byte, error) {
 	switch {
-	case val == "-":
+	case val == "-", val == "@-":
 		return io.ReadAll(os.Stdin)
 	case strings.HasPrefix(val, "@"):
 		b, err := os.ReadFile(val[1:])
@@ -708,6 +808,7 @@ USAGE
   weeb [METHOD] URL [opts]   open the TUI prefilled with the request
   weeb cert HOST [opts]      inspect a TLS certificate / chain
   weeb curl '<curl cmd>'     run a pasted curl command (import)
+  weeb completion zsh|bash   print shell completion script
   weeb version               print the build version
 
   METHOD defaults to GET. A URL opens the interactive builder, BUT weeb runs a
@@ -720,7 +821,7 @@ OPTIONS
   -H, --header "K: V"   add a request header (repeatable)
   -d, --data DATA       request body; DATA may be:
                           @file   read the file
-                          -       read stdin
+                          -, @-   read stdin
                           string  a literal body
                         (if -d is omitted and stdin is piped, the pipe is the body)
   -X, --request METHOD  set the method explicitly
@@ -746,6 +847,22 @@ OPTIONS
                         bytes or k/m/g, 0 = no cap. Piped/-o bodies are never capped
   -h, --help            show this help
 
+MONITORING (--check; a check_http replacement)
+      --check           monitoring-plugin mode (Nagios/Icinga/Sensu/Zabbix):
+                        print one "HTTP OK - ... |perfdata" line on stdout and
+                        exit 0/1/2/3 (OK/WARNING/CRITICAL/UNKNOWN) instead of
+                        the normal output; perfdata carries response time, body
+                        size, and days_until_expiry when the connection was TLS
+                        (alias --nagios)
+      --expect-status S statuses that count as OK: codes, ranges, or classes,
+                        e.g. "200", "200-204,301", "2xx" (default: any < 400)
+      --expect-body RE  CRITICAL unless the body matches this Go regexp
+  -w, --warn DUR        WARNING when the request takes longer, e.g. 500ms
+  -c, --crit DUR        CRITICAL when the request takes longer, e.g. 2s
+      --json            render the verdict as one JSON object instead of the
+                        plugin line — {check, status, code, message, metrics}
+                        — same exit code (for script_exporter & friends)
+
 CURL IMPORT (weeb curl '<command>')
   Paste a curl command (from docs, DevTools "Copy as cURL", etc.) and weeb runs
   it: -X/-H/-d/--data*, -u (basic auth), -A/-b/-e, @file bodies. Transfer-only
@@ -755,7 +872,9 @@ CURL IMPORT (weeb curl '<command>')
 
 CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   -k, --insecure        inspect even if the chain is untrusted/expired
-      --json            emit the report as JSON (clean, for pipes/monitoring)
+      --json            emit the report as JSON (clean, for pipes/monitoring);
+                        with --check, the evaluated VERDICT object instead
+                        ({check, status, code, message, metrics})
       --pem             dump the chain as PEM (like -showcerts); --showcerts alias
       --brief           show the leaf only, not full detail for every cert (--short)
       --sni NAME        present this SNI/servername (decoupled from the dial host,
@@ -768,8 +887,19 @@ CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
       --client-key  F   matching private key (--key alias; both required together)
       --timeout DUR     dial timeout (default 30s)
       --persona MODE    error voice for dial failures (see --persona above)
+      --check           monitoring-plugin mode: one "CERT OK - ..." line plus
+                        exit 0/1/2/3; validates the chain by default and alerts
+                        on the LEAF's expiry (alias --nagios)
+  -w, --warn DAYS       with --check: WARNING when the leaf expires within
+                        DAYS (default 30)
+  -c, --crit DAYS       with --check: CRITICAL when within DAYS (default 14);
+                        untrusted or expired is always CRITICAL (unless -k)
   exit code is non-zero when the chain is untrusted (unless -k) or expired,
   so 'weeb cert' doubles as a cron/monitoring check.
+
+COMPLETION (weeb completion zsh|bash)
+  prints a static tab-completion script — zsh: save it as _weeb in your $fpath;
+  bash: add 'eval "$(weeb completion bash)"' to ~/.bashrc.
 
 EXAMPLES
   weeb GET  https://api.example.com/me
@@ -781,6 +911,8 @@ EXAMPLES
   weeb cert smtp.gmail.com --starttls smtp
   weeb cert 93.184.216.34 --sni example.com
   weeb cert example.com --pem > chain.pem
+  weeb cert example.com --check -w 30 -c 14
+  weeb https://api.example.com/health --check --expect-body '"status": *"ok"' -w 500ms -c 2s
 
 TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
@@ -789,7 +921,8 @@ TUI KEYS
 
 ENVIRONMENT (prefills, applied unless you override them)
   WEEB_BASE_URL    relative URLs ("/me") resolve against this base
-  WEEB_HEADERS     default headers on every request, "K:V;K2:V2"
+  WEEB_HEADERS     default headers on every request, "K:V;K2:V2" (\; escapes a
+                   semicolon inside a value, \\ a backslash)
   WEEB_TOKEN       adds "Authorization: Bearer $WEEB_TOKEN" unless you set Authorization
   WEEB_PERSONA     error voice: plain (default) | dere | tsun | yan
   WEEB_RAINBOW     1/true to launch the TUI in 🌈 mode (toggle live with ctrl+y)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -109,6 +110,12 @@ type RequestSpec struct {
 	// maxBodyBytes — the caller owns the destination (a pipe, a file), so
 	// memory stays constant no matter the size, like curl.
 	BodySink io.Writer
+
+	// envHeaderKeys holds the lowercased names of the headers resolveSpec
+	// injected from the environment (WEEB_HEADERS, WEEB_TOKEN), so
+	// redirectPolicy can strip exactly those on a cross-origin hop without
+	// touching same-named headers the user typed themselves.
+	envHeaderKeys []string
 }
 
 // Result is the outcome of handling one request. Body always holds the raw
@@ -184,13 +191,22 @@ func (c *Client) SetTimeout(d time.Duration) {
 	c.explicitTimeout = true
 }
 
+// envHeaderKeysCtx carries spec.envHeaderKeys on the request context so
+// redirectPolicy can see which headers were env-injected — CheckRedirect
+// requests inherit the original request's context.
+type envHeaderKeysCtx struct{}
+
 // redirectPolicy follows up to 10 redirects (the stdlib limit) but strips
 // credential headers when a redirect leaves the original origin. Go's default
 // policy only drops Authorization/Cookie on cross-DOMAIN hops — subdomains
 // are allowed, the scheme is ignored, and custom headers are never touched —
 // so the ambient env credentials weeb injects (WEEB_HEADERS, WEEB_TOKEN)
 // would otherwise follow a redirect to an attacker origin, and a bearer token
-// would survive a same-host https→http downgrade in cleartext.
+// would survive a same-host https→http downgrade in cleartext. Only headers
+// resolveSpec actually injected (recorded on the context at build time, not
+// re-read from the env) are stripped: a user-typed header that merely shares
+// a name with a WEEB_HEADERS key is the user's own and follows redirects
+// like any custom header, matching curl.
 func redirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return fmt.Errorf("stopped after 10 redirects")
@@ -201,8 +217,10 @@ func redirectPolicy(req *http.Request, via []*http.Request) error {
 	req.Header.Del("Authorization")
 	req.Header.Del("Proxy-Authorization")
 	req.Header.Del("Cookie")
-	for _, h := range parseHeaderList(os.Getenv("WEEB_HEADERS")) {
-		req.Header.Del(h.Key)
+	if keys, ok := req.Context().Value(envHeaderKeysCtx{}).([]string); ok {
+		for _, k := range keys {
+			req.Header.Del(k)
+		}
 	}
 	return nil
 }
@@ -355,6 +373,11 @@ func (c *Client) Do(spec RequestSpec) Result {
 // Header prefills are skipped when spec.HeadersResolved is set — the user has
 // already seen (and possibly deleted) them in the form, and a deleted auth
 // header must stay deleted. URL resolution always applies.
+//
+// Each header actually injected here is recorded in spec.envHeaderKeys so
+// redirectPolicy strips exactly those on a cross-origin hop — a user-supplied
+// header that happens to share a name with a WEEB_HEADERS key is never
+// injected, and so never stripped.
 func resolveSpec(spec RequestSpec) RequestSpec {
 	if base := envOr("WEEB_BASE_URL", ""); base != "" {
 		if u := strings.TrimSpace(spec.URL); u != "" && !hasScheme(u) {
@@ -383,11 +406,13 @@ func resolveSpec(spec RequestSpec) RequestSpec {
 		lk := strings.ToLower(h.Key)
 		if !have[lk] {
 			spec.Headers = append(spec.Headers, h)
+			spec.envHeaderKeys = append(spec.envHeaderKeys, lk)
 			have[lk] = true
 		}
 	}
 	if tok := os.Getenv("WEEB_TOKEN"); tok != "" && !have["authorization"] {
 		spec.Headers = append(spec.Headers, Header{Key: "Authorization", Value: "Bearer " + tok})
+		spec.envHeaderKeys = append(spec.envHeaderKeys, "authorization")
 	}
 	return spec
 }
@@ -415,6 +440,9 @@ func buildRequest(spec RequestSpec) (*http.Request, error) {
 			continue
 		}
 		req.Header.Add(h.Key, h.Value)
+	}
+	if len(spec.envHeaderKeys) > 0 {
+		req = req.WithContext(context.WithValue(req.Context(), envHeaderKeysCtx{}, spec.envHeaderKeys))
 	}
 	return req, nil
 }
@@ -447,10 +475,11 @@ func joinURL(base, rel string) string {
 }
 
 // parseHeaderList parses a "K:V;K2:V2" string into headers, tolerating spaces
-// and empty segments.
+// and empty segments. A backslash escapes the separator, so "\;" yields a
+// literal semicolon inside a value and "\\" a literal backslash.
 func parseHeaderList(s string) []Header {
 	var out []Header
-	for _, part := range strings.Split(s, ";") {
+	for _, part := range splitHeaderSegments(s) {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -462,6 +491,26 @@ func parseHeaderList(s string) []Header {
 		out = append(out, Header{Key: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
 	}
 	return out
+}
+
+// splitHeaderSegments splits s on unescaped ';', unescaping "\;" and "\\"
+// within each segment. Any other backslash passes through unchanged.
+func splitHeaderSegments(s string) []string {
+	var segs []string
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\\' && i+1 < len(s) && (s[i+1] == ';' || s[i+1] == '\\'):
+			b.WriteByte(s[i+1])
+			i++
+		case c == ';':
+			segs = append(segs, b.String())
+			b.Reset()
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return append(segs, b.String())
 }
 
 // prettyBody pretty-prints the body when it looks like JSON, otherwise returns

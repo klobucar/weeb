@@ -200,6 +200,57 @@ the cert of the URL you're pointed at — the report folds like a response, so e
 cert in the chain is a collapsible section (the leaf shows on load; the CA certs
 above it start folded — `←`/`→` to select, `enter` to open, `±` for all).
 
+## Monitoring (`--check`)
+
+`--check` (alias `--nagios`) turns either command into a proper monitoring
+plugin (the format Nagios, Icinga, Sensu and Zabbix agents all consume):
+exactly one `SERVICE STATUS - message|perfdata` line on stdout and the verdict
+in the exit code — 0 OK, 1 WARNING, 2 CRITICAL, 3 UNKNOWN. Unlike `check_http`,
+the TLS chain is validated *by default*, and you get expiry early-warning for
+free:
+
+```sh
+# cert check: WARNING within 30 days of expiry, CRITICAL within 14 (the defaults)
+weeb cert example.com --check -w 30 -c 14
+# CERT OK - example.com:443 expires in 87 days (2026-09-04)|days=87;30;14
+
+# HTTP check: status, latency thresholds, and a body assertion
+weeb https://api.example.com/health --check \
+  --expect-status 2xx --expect-body '"status": *"ok"' -w 500ms -c 2s
+# HTTP OK - 200 OK in 123 ms, 512 bytes|time=0.123s;0.500;2.000 size=512B days_until_expiry=87
+```
+
+`--expect-status` takes codes, ranges, or classes (`200`, `200-204,301`,
+`2xx`); without it, any status under 400 is OK. `--expect-body` is a Go
+regexp; no match is CRITICAL. The HTTP perfdata always includes the leaf
+cert's `days_until_expiry` on TLS connections, so one check can feed both
+latency and expiry alerting.
+
+Prefer structured output? Add `--json` and the same verdict (same exit code)
+comes back as one JSON object instead of the plugin line:
+
+```sh
+weeb https://api.example.com/health --check --json -w 500ms | jq .
+# {
+#   "check": "http", "status": "OK", "code": 0,
+#   "message": "200 OK in 123 ms, 512 bytes",
+#   "metrics": { "http_status": 200, "time_ms": 123, "size_bytes": 512,
+#                "warn_ms": 500, "days_until_expiry": 87 }
+# }
+```
+
+Note the distinction on the cert side: plain `weeb cert HOST --json` emits the
+full *report* (chain, SANs, fingerprints — no verdict), while
+`weeb cert HOST --check --json` emits the evaluated *verdict* against your
+thresholds. The report is for inspection; the verdict is for alerting.
+
+No Prometheus exporter is planned — that's a daemon, and
+[blackbox_exporter](https://github.com/prometheus/blackbox_exporter) already
+is one. If you want these numbers in Prometheus anyway, `weeb cert --json`
+plus the node_exporter textfile collector is a one-line cron job, or wire
+`--check` output through
+[script_exporter](https://github.com/ricoberger/script_exporter).
+
 ## TUI keys
 
 | Key | Action |
