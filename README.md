@@ -324,6 +324,38 @@ regexp; no match is CRITICAL. The HTTP perfdata always includes the leaf
 cert's `days_until_expiry` on TLS connections, so one check can feed both
 latency and expiry alerting.
 
+Headers and JSON fields can be asserted too. Both flags repeat, and any
+failure is CRITICAL:
+
+```sh
+weeb https://api.example.com/health --check \
+  --expect-header 'Content-Type: ^application/json' --expect-header '!X-Debug' \
+  --expect-json '.status == "ok"' --expect-json '.data.items | length >= 1'
+# HTTP CRITICAL - json .status == "ok": got "degraded" (+1 more failed)|time=0.123s;; size=512B days_until_expiry=87
+```
+
+| Flag | Passes when |
+|------|-------------|
+| `--expect-header 'Name'` | the response has the header |
+| `--expect-header 'Name: RE'` | the header is present and a value matches the Go regexp |
+| `--expect-header '!Name'` | the header is absent |
+| `--expect-json 'EXPR'` | the body is JSON and satisfies `EXPR` |
+
+`EXPR` is a small jq-like path with an optional comparison:
+`.status == "ok"`, `.items[0].id != null`, `.count > 0`,
+`.version =~ "^2\."`, `.data.items | length >= 1`. A bare path such as
+`.a.b` must exist and be neither `null` nor `false`. Paths take `.key`,
+`.["key with spaces"]` and `[N]` (negative counts from the end); values are
+JSON literals; the operators are `==`, `!=`, `<`, `<=`, `>`, `>=` (numbers or
+strings) and `=~` (a double-quoted Go regexp, backslashes passed through as
+written). `| length` is the only function. As in jq, a missing key reads as
+`null`. A body that isn't JSON is CRITICAL, and the body is the one already
+read, so `--max-body` still caps it. A malformed expression or header spec is
+UNKNOWN, like a bad `--expect-status`, with the column it went wrong at.
+
+The plugin line reports the first failure (status, then `--expect-body`,
+headers and JSON in flag order) and counts the rest.
+
 Prefer structured output? Add `--json` and the same verdict (same exit code)
 comes back as one JSON object instead of the plugin line:
 
@@ -333,9 +365,14 @@ weeb https://api.example.com/health --check --json -w 500ms | jq .
 #   "check": "http", "status": "OK", "code": 0,
 #   "message": "200 OK in 123 ms, 512 bytes",
 #   "metrics": { "http_status": 200, "time_ms": 123, "size_bytes": 512,
-#                "warn_ms": 500, "days_until_expiry": 87 }
+#                "warn_ms": 500, "days_until_expiry": 87 },
+#   "assertions": [ { "type": "status", "expect": "status < 400",
+#                     "ok": true, "actual": "200" } ]
 # }
 ```
+
+`assertions` lists every assertion in order with its outcome, the observed
+value (clipped to 80 characters), and for failures the message.
 
 Note the distinction on the cert side: plain `weeb cert HOST --json` emits the
 full *report* (chain, SANs, fingerprints — no verdict), while
