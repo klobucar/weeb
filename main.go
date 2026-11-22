@@ -285,6 +285,9 @@ func runCLI(a cliArgs) int {
 	} else if !stdoutIsTTY() && !a.include && !a.check {
 		spec.BodySink = os.Stdout
 	}
+	if !a.check { // at a terminal, an event stream prints event by event as it arrives
+		spec.OnStream = ttyStream(a.stats, a.quiet, a.prettyOn(), a.include)
+	}
 
 	res := client.Do(spec)
 	if a.check {
@@ -338,6 +341,7 @@ func runCurlImport(args []string) int {
 	if !stdoutIsTTY() {
 		spec.BodySink = os.Stdout // piped: stream the raw bytes, uncapped
 	}
+	spec.OnStream = ttyStream(false, false, envBool("WEEB_PRETTY", true), false)
 	res := client.Do(spec)
 	return emitResult(res, false, false, envBool("WEEB_PRETTY", true), false)
 }
@@ -350,6 +354,9 @@ func runCurlImport(args []string) int {
 // server-influenced text (body, TLS leaf name, error strings); piped output
 // is the writer itself, so pipes still get the exact server bytes.
 func emitResult(res Result, wantStats, quiet, pretty, include bool) int {
+	if res.Stream != streamNone { // printed live by ttyStream; only the close is left
+		return emitStreamEnd(res, wantStats, quiet)
+	}
 	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
 
 	if !quiet && (color || wantStats) && res.Status != 0 {
@@ -908,7 +915,8 @@ OPTIONS
       --timeout DUR     request timeout, e.g. 10s, 500ms (default 30s). For
                         streamed bodies (-o / piped) the default bounds the wait
                         for headers, not the transfer; an explicit --timeout
-                        caps the whole transfer
+                        caps the whole transfer. For event streams (see
+                        STREAMING) it is an idle timeout instead
       --no-follow       don't follow redirects — show the 3xx response itself
                         (status, Location header, body); by default weeb follows
                         up to 10 redirects (implies headless)
@@ -964,6 +972,15 @@ MONITORING (--check; a check_http replacement)
                         — same exit code (for script_exporter & friends)
                         HTTP verdicts also list "assertions": each one's type,
                         expect, ok, and actual value (clipped)
+
+STREAMING (text/event-stream, application/x-ndjson, jsonl, json-seq)
+  Event streams render live as each event arrives. At a terminal (and in the
+  TUI) each SSE event prints as a block, event:/id: on one line and JSON data
+  pretty-printed; each NDJSON line is its own block. Piped or -o gets the exact
+  bytes as they arrive. The default timeout bounds only the wait for headers,
+  never the stream; an explicit --timeout ends a stream after DUR with no
+  data. In the TUI, esc stops a stream and keeps what arrived; the pane keeps
+  the newest 2000 events (at most 4 MB).
 
 CURL IMPORT (weeb curl '<command>')
   Paste a curl command (from docs, DevTools "Copy as cURL", etc.) and weeb runs
@@ -1055,7 +1072,8 @@ EXAMPLES
 
 TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
-  ctrl+s send · ctrl+t inspect TLS cert · ctrl+x export as curl · ctrl+p pretty · ctrl+y 🌈 · ctrl+g debug
+  ctrl+s send · esc stop a request/stream · ctrl+t inspect TLS cert · ctrl+x export as curl
+  ctrl+p pretty · ctrl+y 🌈 · ctrl+g debug
   in the response pane: ↑↓ scroll · ←→ select section or node (JSON/XML/HTML/YAML) · enter fold · -/+ fold all
   y copy the node's path (jq/XPath) · Y copy its value · ctrl+x also copies the curl (clipboard via OSC 52)
 

@@ -46,6 +46,7 @@ own site, leaf → ISRG Root:
 - **curl import & export** — paste a `curl` command to run it (`weeb curl '…'`), or turn any request into one (`--to-curl`, or `ctrl+x` in the TUI).
 - **`.http` files** — run requests from VS Code REST Client / JetBrains HTTP Client files (`weeb run api.http login`).
 - **Pretty bodies** — JSON, XML, HTML & YAML get syntax color and **collapsible folding**; Markdown gets a full [Glamour](https://github.com/charmbracelet/glamour) render. `--raw` for the exact bytes.
+- **Live streams** — Server-Sent Events and NDJSON (hello, LLM APIs) render event by event as they arrive, in the TUI and at the terminal.
 - **File viewer** — `weeb view data.json` (or `… | weeb view`) browses a local JSON/XML/HTML/YAML/Markdown file in the same foldable pane, like jless or fx; piped, it's a pretty-printer.
 - **TLS inspection** — a friendlier `openssl s_client`: full chain, expiry, SANs, ciphers, OCSP/SCT, plus `--starttls`, `--sni` override, `--alpn`, version pinning, client certs, and `--pem` dump.
 - **Timing breakdown** — per-phase DNS / TCP / TLS / send / wait / recv stats with a colored bar.
@@ -102,7 +103,7 @@ In headless mode the response **body** goes to stdout; weeb's errors, logs, and
 | `-H, --header "K: V"` | Add a request header (repeatable) |
 | `-d, --data DATA` | Body: `@file`, `-` (stdin), or a literal string |
 | `-X, --request METHOD` | Set the method explicitly |
-| `--timeout DUR` | Request timeout, e.g. `10s`, `500ms` (default 30s) |
+| `--timeout DUR` | Request timeout, e.g. `10s`, `500ms` (default 30s); an idle timeout for event streams (see [Streaming](#streaming-sse--ndjson)) |
 | `-v, --stats` | Print timing + negotiated TLS to stderr, even when piping |
 | `--pretty` | Force the pretty/colored body view (the default at a TTY) |
 | `--raw` | Force raw output — exactly the bytes the server sent (implies `--no-tui`) |
@@ -142,6 +143,32 @@ In the response pane, fold to cut the noise:
 | `enter` | Fold / unfold the selection |
 | `-` / `+` | Fold / unfold everything |
 
+## Streaming (SSE & NDJSON)
+
+Server-Sent Events (`text/event-stream`) and JSON lines (`application/x-ndjson`,
+`application/jsonl`, `application/json-seq`), the shapes most LLM APIs stream
+in, render live as each event arrives, not after the server closes the stream:
+
+- **TUI**: each SSE event is a block, with its `event:`/`id:` on one compact
+  line and its `data:` pretty-printed and colored when it's JSON. Each NDJSON
+  line is a block of its own. The status line counts events as they arrive
+  (`streaming… 42 events`). The pane follows the newest event; scroll up to
+  pause that, and scroll back to the bottom to resume. `esc` stops the stream:
+  the connection closes, everything received stays on screen, and weeb keeps
+  running. `ctrl+p` flips between the blocks and the raw lines.
+- **CLI at a terminal**: the same blocks print as each event arrives. The status
+  goes to stderr when the stream starts, and the timing when it ends.
+- **Piped or `-o`**: the exact bytes as received, as they arrive.
+
+A stream can run as long as the server keeps it open, so the 30s default
+timeout bounds only the wait for the response headers, never the stream. An
+explicit `--timeout DUR` is an **idle timeout** for a stream: it ends with an
+error once DUR passes with no data. For every other response, `--timeout`
+still caps the whole request.
+
+The TUI keeps the newest 2000 events (at most 4 MB, less if `--max-body` is
+lower) and notes how many older ones it dropped. A single event over 1 MB
+(or `--max-body`) is cut and marked.
 ## Viewing files
 
 `weeb view` points the response pane at a local file instead of a request, so
@@ -465,6 +492,7 @@ plus the node_exporter textfile collector is a one-line cron job, or wire
 | `←` / `→` | Pick HTTP method (when the method field is focused) |
 | `ctrl+o` / `ctrl+r` | Add / remove a header row |
 | `ctrl+s` | Send the request |
+| `esc` | Stop the request in flight; a stream ends and keeps what arrived |
 | `ctrl+t` | Inspect the TLS cert |
 | `ctrl+x` | Export the current request as `curl` and copy it to the clipboard |
 | `y` / `Y` | Copy the selected node's path / value (response pane only) |
