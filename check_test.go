@@ -253,6 +253,20 @@ func TestCheckHTTP(t *testing.T) {
 	}
 }
 
+// TestCheckLineSinglePerfdataSeparator: a '|' in a user-supplied value echoed
+// into the message (--expect-body 'ok|healthy') must not start the perfdata
+// early — monitoring systems split the line at the first '|'.
+func TestCheckLineSinglePerfdataSeparator(t *testing.T) {
+	res := Result{Status: 200, StatusText: "OK", Body: []byte("degraded")}
+	line := checkHTTP(res, mustOpts(t, cliArgs{check: true, expectBody: `ok|healthy`})).line()
+	if n := strings.Count(line, "|"); n != 1 {
+		t.Errorf("plugin line has %d '|', want 1 (the perfdata separator): %q", n, line)
+	}
+	if !strings.Contains(line, `body does not match "ok/healthy"`) {
+		t.Errorf("message should show the pattern with '|' flattened to '/': %q", line)
+	}
+}
+
 // mustExpect compiles an --expect-status spec or fails the test.
 func mustExpect(t *testing.T, spec string) func(int) bool {
 	t.Helper()

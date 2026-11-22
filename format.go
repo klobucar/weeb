@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/glamour/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -356,20 +357,24 @@ func colorizeAttrs(s string, st styles) string {
 // sanitizeTTY neutralizes terminal control sequences in server-influenced
 // text before it reaches a TTY. A hostile body could otherwise write the
 // clipboard (OSC 52), retitle the window, or move the cursor to spoof output.
-// SGR color (CSI…m) and OSC 8 hyperlinks — the only sequences weeb's own
-// renderers emit — are kept; everything else (other CSI, other OSC, DCS/APC/
-// PM/SOS payloads, two-byte escapes, stray C0 controls, and the 8-bit C1
-// forms of all of these) is dropped. Decoding goes through ansi.DecodeSequence
-// rather than a byte scanner so multibyte UTF-8 text is never corrupted —
-// continuation bytes share the 0x80–0x9F range with C1 controls and only a
-// real decoder can tell them apart. Piped output never goes through here:
-// pipes get the exact server bytes.
+// Only what weeb's own renderers emit is kept: SGR color (CSI…m whose
+// parameters are just digits, ';' and ':') and terminated OSC 8 hyperlinks
+// whose params/URI are valid UTF-8 free of controls. Everything else (other
+// CSI, private/intermediate CSI…m forms, other OSC, DCS/APC/PM/SOS payloads,
+// two-byte escapes, stray C0 controls, and the 8-bit C1 forms of all of
+// these) is dropped, and invalid UTF-8 in text becomes U+FFFD. Decoding goes
+// through ansi.DecodeSequence rather than a byte scanner so multibyte UTF-8
+// text is never corrupted — continuation bytes share the 0x80–0x9F range
+// with C1 controls and only a real decoder can tell them apart. Piped output
+// never goes through here: pipes get the exact server bytes.
 func sanitizeTTY(s string) string {
-	var b *strings.Builder // nil until the first drop: clean input is returned as-is
+	var b *strings.Builder // nil until the first change: clean input is returned as-is
 	var state byte
-	p := ansi.NewParser()
 	for i := 0; i < len(s); {
-		seq, width, n, newState := ansi.DecodeSequence(s[i:], state, p)
+		// No Parser: sequence boundaries don't depend on it, and with one,
+		// x/ansi v0.11.7's DecodeSequence indexes past its 32-entry params
+		// buffer on a CSI with more than 32 ';'/':' separators and panics.
+		seq, width, n, newState := ansi.DecodeSequence(s[i:], state, nil)
 		if n == 0 { // decoder can't advance; drop the remainder
 			if b == nil {
 				b = new(strings.Builder)
@@ -377,50 +382,112 @@ func sanitizeTTY(s string) string {
 			}
 			break
 		}
-		if keepOnTTY(seq, width) {
-			if b != nil {
-				b.WriteString(seq)
-			}
-		} else if b == nil {
+		out, keep := seq, keepOnTTY(seq, width)
+		if keep && width > 0 && !utf8.ValidString(seq) {
+			out = repairInvalidUnit(seq)
+		}
+		if b == nil && (!keep || out != seq) {
 			b = new(strings.Builder)
 			b.Grow(len(s))
 			b.WriteString(s[:i])
+		}
+		if b != nil && keep {
+			b.WriteString(out)
 		}
 		i += n
 		state = newState
 	}
 	if b == nil {
-		return s // fast path: nothing dropped (weeb's own SGR-styled output)
+		return s // fast path: nothing changed (weeb's own SGR-styled output)
 	}
 	return b.String()
 }
 
 // keepOnTTY reports whether one decoded unit may pass through to a terminal:
 // a printable grapheme, newline/tab, an SGR sequence, or a terminated OSC 8
-// hyperlink (7- or 8-bit form either way).
+// hyperlink with a clean payload (7- or 8-bit form either way).
 func keepOnTTY(seq string, width int) bool {
 	if width > 0 || seq == "\n" || seq == "\t" {
 		return true
 	}
 	if ansi.HasCsiPrefix(seq) && seq[len(seq)-1] == 'm' {
-		return true // SGR — a final 'm' also proves the sequence is complete
+		// A final 'm' alone doesn't make it SGR: CSI > 4;2 m (XTMODKEYS) changes
+		// keyboard modes that outlive weeb, and CSI ? 4 m (XTQMODKEYS) makes the
+		// terminal type a reply into tty input. The 'm' does prove the sequence
+		// is complete.
+		params := seq[1 : len(seq)-1] // 8-bit CSI (0x9b)
+		if seq[0] == 0x1b {
+			params = seq[2 : len(seq)-1] // 7-bit ESC [
+		}
+		return isSGRParams(params)
 	}
 	if ansi.HasOscPrefix(seq) {
 		body := seq[1:] // 8-bit OSC (0x9d)
 		if seq[0] == 0x1b {
 			body = seq[2:] // 7-bit ESC ]
 		}
+		if !strings.HasPrefix(body, "8;") {
+			return false
+		}
 		// Unterminated OSCs are dropped even for 8;… — kept, they would make
 		// the terminal swallow whatever weeb prints next as payload.
-		return strings.HasPrefix(body, "8;") && hasOscTerminator(seq)
+		payload, ok := trimOscTerminator(body)
+		// Terminals differ on whether a control inside an OSC string aborts it
+		// (and then act on what follows); a real link never needs one.
+		return ok && isCleanOscPayload(payload)
 	}
 	return false
 }
 
-func hasOscTerminator(seq string) bool {
-	return strings.HasSuffix(seq, "\x07") || // BEL
-		strings.HasSuffix(seq, "\x1b\\") || // 7-bit ST
-		strings.HasSuffix(seq, "\x9c") // 8-bit ST
+// repairInvalidUnit rewrites a "printable" unit that isn't valid UTF-8. The
+// decoder can fold the bytes after a truncated multibyte lead into the unit:
+// a 0x80–0x9F byte ("\xe6\x9b"), which a terminal in 8-bit C1 mode acts on
+// (0x9b is CSI), or a trailing ESC ("\xe8\x1b" at the end of a write), which
+// the terminal would join with whatever is printed next. So take what a UTF-8
+// terminal would decode (U+FFFD for the invalid bytes) and sanitize that like
+// any other text; it is valid UTF-8, so this recurses at most once.
+func repairInvalidUnit(seq string) string {
+	return sanitizeTTY(strings.ToValidUTF8(seq, "�"))
+}
+
+// isSGRParams reports whether the bytes between a CSI introducer and its
+// final 'm' are plain SGR parameters.
+func isSGRParams(p string) bool {
+	for i := 0; i < len(p); i++ {
+		if c := p[i]; (c < '0' || c > '9') && c != ';' && c != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+// trimOscTerminator strips the BEL or ST ending an OSC string; ok is false
+// when there is none.
+func trimOscTerminator(body string) (payload string, ok bool) {
+	for _, term := range []string{
+		"\x07",   // BEL
+		"\x1b\\", // 7-bit ST
+		"\x9c",   // 8-bit ST
+	} {
+		if payload, ok = strings.CutSuffix(body, term); ok {
+			return payload, true
+		}
+	}
+	return body, false
+}
+
+// isCleanOscPayload reports whether an OSC payload is valid UTF-8 without C0,
+// DEL or C1 controls (raw C1 bytes are invalid UTF-8, so they fail too).
+func isCleanOscPayload(p string) bool {
+	if !utf8.ValidString(p) {
+		return false
+	}
+	for _, r := range p {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
 }
 
 // sanitizingWriter passes every Write through sanitizeTTY. It is the output

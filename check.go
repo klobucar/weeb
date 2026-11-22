@@ -53,8 +53,12 @@ func newCheckVerdict(check string, code int, msg, perf string, metrics map[strin
 }
 
 // line renders the one-line plugin format: "CERT OK - message|perfdata".
+// The whole message goes through checkSafe, not just its peer-controlled
+// parts: user-supplied values echoed into it (an --expect-body 'ok|healthy'
+// pattern) would otherwise start the perfdata early, leaving the one '|'
+// below as the only separator.
 func (v checkVerdict) line() string {
-	s := strings.ToUpper(v.Check) + " " + v.Status + " - " + v.Message
+	s := strings.ToUpper(v.Check) + " " + v.Status + " - " + checkSafe(v.Message)
 	if v.perf != "" {
 		s += "|" + v.perf
 	}
