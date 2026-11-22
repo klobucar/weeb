@@ -836,7 +836,7 @@ USAGE
   weeb [METHOD] URL [opts]   open the TUI prefilled with the request
   weeb cert HOST [opts]      inspect a TLS certificate / chain
   weeb curl '<curl cmd>'     run a pasted curl command (import)
-  weeb completion zsh|bash   print shell completion script
+  weeb completion SHELL      print shell completion script (zsh|bash|fish)
   weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
   weeb version               print the build version
 
@@ -932,9 +932,10 @@ CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   exit code is non-zero when the chain is untrusted (unless -k) or expired,
   so 'weeb cert' doubles as a cron/monitoring check.
 
-COMPLETION (weeb completion zsh|bash)
+COMPLETION (weeb completion zsh|bash|fish)
   prints a static tab-completion script — zsh: save it as _weeb in your $fpath;
-  bash: add 'eval "$(weeb completion bash)"' to ~/.bashrc.
+  bash: add 'eval "$(weeb completion bash)"' to ~/.bashrc;
+  fish: weeb completion fish > ~/.config/fish/completions/weeb.fish
 
 EXAMPLES
   weeb GET  https://api.example.com/me

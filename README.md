@@ -63,6 +63,17 @@ git clone https://github.com/klobucar/weeb && cd weeb
 go build -o weeb .
 ```
 
+### Shell completion
+
+`weeb completion SHELL` prints a tab-completion script for subcommands, methods,
+flags, and personas:
+
+```sh
+weeb completion zsh > ~/.zfunc/_weeb                          # zsh: any dir on your $fpath
+echo 'eval "$(weeb completion bash)"' >> ~/.bashrc            # bash
+weeb completion fish > ~/.config/fish/completions/weeb.fish   # fish
+```
+
 ## Quick start
 
 **Interactive** — run it bare for an empty builder, or give it a URL to open
