@@ -124,23 +124,23 @@ func certArgEscape(path string) string {
 	return strings.NewReplacer(`\`, `\\`, `:`, `\:`).Replace(path)
 }
 
-// tlsTransportKey picks a cached transport: the TLS settings, plus whether it
-// is the streaming variant (which bounds time-to-headers, see newClient).
+// tlsTransportKey picks a cached transport: the TLS settings, plus the base
+// transport it was cloned from (the shared default, or one a caller such as
+// --repeat installed on the Client).
 type tlsTransportKey struct {
-	opts   TLSOptions
-	stream bool
+	opts TLSOptions
+	base http.RoundTripper
 }
 
-// httpClientFor returns the http.Client to send spec with. A request without
-// TLS options or a cookie jar uses the Client's shared clients unchanged;
-// otherwise it gets a shallow copy that keeps their timeout and redirect
-// policy but swaps in a transport built for its TLS settings and/or the jar.
-func (c *Client) httpClientFor(spec RequestSpec, jar *cookieSession) (*http.Client, error) {
-	// Streaming with the default timeout: bound the wait for headers, never
-	// the body copy. An explicit --timeout keeps the total cap even here.
-	stream := spec.BodySink != nil && !c.explicitTimeout
+// httpClientFor returns the http.Client to send spec with: the live client
+// (no http.Client.Timeout; Do's liveTimer bounds it) when live, else the
+// buffered one. A request without TLS options or a cookie jar uses that
+// shared client unchanged; otherwise it gets a shallow copy that keeps its
+// timeout and redirect policy but swaps in a transport built for its TLS
+// settings and/or the jar.
+func (c *Client) httpClientFor(spec RequestSpec, jar *cookieSession, live bool) (*http.Client, error) {
 	base := c.http
-	if stream {
+	if live {
 		base = c.stream
 	}
 	if spec.TLS.isZero() && jar == nil {
@@ -148,7 +148,7 @@ func (c *Client) httpClientFor(spec RequestSpec, jar *cookieSession) (*http.Clie
 	}
 	hc := *base
 	if !spec.TLS.isZero() {
-		tr, err := c.tlsTransport(spec.TLS, stream)
+		tr, err := c.tlsTransport(spec.TLS, base.Transport)
 		if err != nil {
 			return nil, err
 		}
@@ -161,14 +161,15 @@ func (c *Client) httpClientFor(spec RequestSpec, jar *cookieSession) (*http.Clie
 }
 
 // tlsTransport returns the transport for a set of TLS options, building it on
-// first use. It is a clone of http.DefaultTransport — the default is shared
-// process-wide and must never be mutated — so proxy-from-environment, the dial
-// timeout and HTTP/2 all carry over. Transports are cached so repeated TUI
-// sends reuse their connections; the key files are read once per process.
-func (c *Client) tlsTransport(o TLSOptions, stream bool) (*http.Transport, error) {
+// first use. It clones base (http.DefaultTransport when nil, or not an
+// *http.Transport) — the default is shared process-wide and must never be
+// mutated — so proxy-from-environment, the dial timeout, HTTP/2 and any pool
+// settings a caller put on base all carry over. Transports are cached so
+// repeated TUI sends reuse their connections; key files are read once.
+func (c *Client) tlsTransport(o TLSOptions, base http.RoundTripper) (*http.Transport, error) {
 	c.trMu.Lock()
 	defer c.trMu.Unlock()
-	key := tlsTransportKey{opts: o, stream: stream}
+	key := tlsTransportKey{opts: o, base: base}
 	if tr, ok := c.transports[key]; ok {
 		return tr, nil
 	}
@@ -176,11 +177,12 @@ func (c *Client) tlsTransport(o TLSOptions, stream bool) (*http.Transport, error
 	if err != nil {
 		return nil, err
 	}
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.TLSClientConfig = cfg
-	if stream {
-		tr.ResponseHeaderTimeout = defaultTimeout
+	from, ok := base.(*http.Transport)
+	if !ok {
+		from = http.DefaultTransport.(*http.Transport)
 	}
+	tr := from.Clone()
+	tr.TLSClientConfig = cfg
 	if c.transports == nil {
 		c.transports = map[tlsTransportKey]*http.Transport{}
 	}

@@ -220,7 +220,7 @@ func TestClientTLSTransport(t *testing.T) {
 	c := testClient()
 	opts := TLSOptions{Insecure: true}
 
-	tr, err := c.tlsTransport(opts, false)
+	tr, err := c.tlsTransport(opts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,20 +236,30 @@ func TestClientTLSTransport(t *testing.T) {
 	if !tr.TLSClientConfig.InsecureSkipVerify {
 		t.Error("transport should carry the TLS options")
 	}
-	if again, _ := c.tlsTransport(opts, false); again != tr {
+	if again, _ := c.tlsTransport(opts, nil); again != tr {
 		t.Error("the same options should reuse the cached transport")
 	}
-	st, _ := c.tlsTransport(opts, true)
-	if st == tr || st.ResponseHeaderTimeout != defaultTimeout {
-		t.Errorf("streaming variant: same=%v, ResponseHeaderTimeout=%v", st == tr, st.ResponseHeaderTimeout)
+	// A transport a caller installed (--repeat's sized pool) is the base the
+	// TLS variant clones, so its pool settings survive -k / --cacert.
+	pool := http.DefaultTransport.(*http.Transport).Clone()
+	pool.MaxIdleConnsPerHost, pool.DisableKeepAlives = 8, true
+	pt, _ := c.tlsTransport(opts, pool)
+	if pt == tr || pt.MaxIdleConnsPerHost != 8 || !pt.DisableKeepAlives || !pt.TLSClientConfig.InsecureSkipVerify {
+		t.Errorf("clone of a custom base: same=%v, MaxIdleConnsPerHost=%d, DisableKeepAlives=%v", pt == tr, pt.MaxIdleConnsPerHost, pt.DisableKeepAlives)
 	}
 
-	if hc, _ := c.httpClientFor(RequestSpec{}, nil); hc != c.http {
+	if hc, _ := c.httpClientFor(RequestSpec{}, nil, false); hc != c.http {
 		t.Error("a plain request should use the shared client")
 	}
-	hc, _ := c.httpClientFor(RequestSpec{TLS: opts}, nil)
+	if hc, _ := c.httpClientFor(RequestSpec{}, nil, true); hc != c.stream {
+		t.Error("a plain live request should use the shared live client")
+	}
+	hc, _ := c.httpClientFor(RequestSpec{TLS: opts}, nil, false)
 	if hc == c.http || hc.Transport != tr || hc.CheckRedirect == nil || hc.Timeout != c.http.Timeout {
 		t.Error("a TLS request should get a copy with its transport, the redirect policy and the timeout")
+	}
+	if lc, _ := c.httpClientFor(RequestSpec{TLS: opts}, nil, true); lc.Timeout != 0 || lc.Transport != tr {
+		t.Errorf("a live TLS request keeps the live client's no-Timeout (liveTimer bounds it): Timeout=%v", lc.Timeout)
 	}
 }
 
@@ -542,5 +552,31 @@ func TestTUIRequestOptions(t *testing.T) {
 	plain := send(t, testModel(), tea.WindowSizeMsg{Width: 120, Height: 40}).(model)
 	if strings.Contains(ansi.Strip(plain.View().Content), "INSECURE") {
 		t.Error("the INSECURE badge should only show with -k")
+	}
+}
+
+// TLS options (#50) and the live streaming path (#46) meet in Do: a -k SSE
+// stream must get a TLS transport on the live client and still arrive event
+// by event, while the same stream without -k fails verification.
+func TestDoStreamOverInsecureTLS(t *testing.T) {
+	clearRequestEnv(t)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		for _, ev := range []string{"data: {\"n\":1}\n\n", "data: [DONE]\n\n"} {
+			_, _ = w.Write([]byte(ev))
+			fl.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient()
+	if res := c.Do(RequestSpec{Method: "GET", URL: srv.URL, OnStream: &recSink{}}); res.Err == nil {
+		t.Fatal("a self-signed stream should fail verification without -k")
+	}
+	sink := &recSink{}
+	res := c.Do(RequestSpec{Method: "GET", URL: srv.URL, OnStream: sink, TLS: TLSOptions{Insecure: true}})
+	if !res.OK() || res.Stream != streamSSE || res.Events != 2 || len(sink.events) != 2 {
+		t.Fatalf("-k stream: err=%v stream=%v events=%d sink=%d", res.Err, res.Stream, res.Events, len(sink.events))
 	}
 }

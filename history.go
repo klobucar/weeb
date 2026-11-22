@@ -504,6 +504,7 @@ func runHistoryReplay(n int) int {
 	if !stdoutIsTTY() {
 		spec.BodySink = os.Stdout // piped: stream the raw bytes, uncapped
 	}
+	spec.OnStream = ttyStream(false, false, envBool("WEEB_PRETTY", true), false)
 	res := client.Do(spec)
 	return emitResult(res, false, false, envBool("WEEB_PRETTY", true), false)
 }

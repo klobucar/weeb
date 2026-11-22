@@ -56,7 +56,10 @@ func (b *safeBuffer) String() string {
 //	WEEB_LOG_FORMAT text|json|logfmt            (default: text)
 //	WEEB_LOG_FILE   path; if set, logs go here instead of stderr; in TUI mode a
 //	                temp file is used when this is unset.
-func newLogger(mode runMode) (*log.Logger, *safeBuffer, func()) {
+//
+// Each wrap decorates the chosen writer; weeb run uses one to mask env-var
+// values out of the URLs Do logs.
+func newLogger(mode runMode, wrap ...func(io.Writer) io.Writer) (*log.Logger, *safeBuffer, func()) {
 	levelStr := envOr("WEEB_LOG", "warn")
 	formatStr := envOr("WEEB_LOG_FORMAT", "text")
 	logFile := os.Getenv("WEEB_LOG_FILE")
@@ -111,6 +114,9 @@ func newLogger(mode runMode) (*log.Logger, *safeBuffer, func()) {
 		}
 	}
 
+	for _, f := range wrap {
+		w = f(w)
+	}
 	logger := log.NewWithOptions(w, log.Options{
 		Level:           level,
 		Formatter:       parseFormatter(formatStr),
