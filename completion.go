@@ -28,6 +28,7 @@ var (
 		"--short", "--sni", "--servername", "--starttls", "--alpn", "--tls",
 		"--client-cert", "--cert", "--client-key", "--key", "--timeout",
 		"--persona",
+		"-f", "--file", "--host",
 	}
 	completionPersonas = []string{"plain", "dere", "tsun", "yan"}
 )
@@ -71,6 +72,7 @@ _weeb() {
     --persona) compadd -a personas; return ;;
     -X|--request) compadd -a methods; return ;;
     -o|--output|-d|--data|--client-cert|--cert|--client-key|--key) _files; return ;;
+    -f|--file) _files; return ;;
   esac
 
   # First word: a subcommand, a method, or straight to flags/URL.
@@ -119,6 +121,7 @@ _weeb() {
     -X|--request) COMPREPLY=($(compgen -W "$methods" -- "$cur")); return ;;
     -o|--output|-d|--data|--client-cert|--cert|--client-key|--key)
       COMPREPLY=($(compgen -f -- "$cur")); return ;;
+    -f|--file) COMPREPLY=($(compgen -f -- "$cur")); return ;;
   esac
 
   # First word: a subcommand, a method, or straight to flags/URL.
