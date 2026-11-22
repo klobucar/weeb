@@ -21,6 +21,7 @@ var (
 		"-v", "--stats", "--pretty", "--raw", "--no-tui", "--headless",
 		"-q", "--quiet", "--persona", "--to-curl", "-o", "--output",
 		"--max-body", "-h", "--help",
+		"--repeat", "--concurrency", "--fresh", "--json",
 	}
 	// Flags accepted after `weeb cert` (see runCert).
 	completionCertFlags = []string{

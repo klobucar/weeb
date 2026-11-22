@@ -115,6 +115,11 @@ type RequestSpec struct {
 	// (status, Location header, body) instead of whatever it points at.
 	NoFollow bool
 
+	// Ctx, when set, bounds the request: cancelling it aborts the send and
+	// the body read (--repeat stops in-flight requests on ctrl+c this way).
+	// Nil means context.Background().
+	Ctx context.Context
+
 	// envHeaderKeys holds the lowercased names of the headers that came from
 	// the environment (WEEB_HEADERS, WEEB_TOKEN) — injected by resolveSpec,
 	// or, for the TUI form, rows still holding their env prefill — so
@@ -175,6 +180,11 @@ type Client struct {
 	// value is a total cap, so Do keeps it on streamed transfers too; only
 	// the DEFAULT timeout steps aside for a BodySink.
 	explicitTimeout bool
+
+	// noHistory skips history recording. --repeat sets it: N copies of one
+	// request would push real entries out of the capped file, and
+	// concurrent appends would race its rewrite.
+	noHistory bool
 }
 
 func newClient(logger *log.Logger, voice ErrorChan) *Client {
@@ -487,7 +497,11 @@ func buildRequest(spec RequestSpec) (*http.Request, error) {
 		body = bytes.NewReader(spec.Body)
 	}
 
-	req, err := http.NewRequest(method, spec.URL, body)
+	ctx := spec.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, spec.URL, body)
 	if err != nil {
 		return nil, err
 	}
