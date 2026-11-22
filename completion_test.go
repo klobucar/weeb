@@ -151,9 +151,25 @@ func TestFishCompletionView(t *testing.T) {
 		"complete -c weeb -n '__fish_seen_subcommand_from view' -F",
 		"complete -c weeb -n '__fish_seen_subcommand_from run' -F",
 		"complete -c weeb -n '__fish_seen_subcommand_from cert tls' -l file -r -F",
+		"complete -c weeb -n '__fish_seen_subcommand_from audit' -l check",
+		"complete -c weeb -n '__fish_seen_subcommand_from audit' -l persona -x -a 'plain dere tsun yan'",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("fish script missing %q", want)
+		}
+	}
+}
+
+// `weeb audit` completes its own flags in both shells.
+func TestCompletionAuditFlags(t *testing.T) {
+	for name, script := range map[string]string{"zsh": zshCompletion(), "bash": bashCompletion()} {
+		if !strings.Contains(script, "audit)") {
+			t.Errorf("%s script has no audit case", name)
+		}
+		for _, f := range completionAuditFlags {
+			if !strings.Contains(script, f) {
+				t.Errorf("%s script missing audit flag %q", name, f)
+			}
 		}
 	}
 }

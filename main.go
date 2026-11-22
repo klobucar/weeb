@@ -62,6 +62,8 @@ func main() {
 		os.Exit(runCompletion(args[1:], os.Stdout))
 	case "history":
 		os.Exit(runHistory(args[1:]))
+	case "audit":
+		os.Exit(runAudit(args[1:]))
 	case "run":
 		os.Exit(runHTTPFile(args[1:]))
 	case "view":
@@ -894,6 +896,7 @@ USAGE
   weeb curl '<curl cmd>'     run a pasted curl command (import)
   weeb completion SHELL      print shell completion script (zsh|bash|fish)
   weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
+  weeb audit URL [opts]      grade a page's security headers
   weeb run FILE [NAME|N]     list the requests in a .http file / run one
   weeb view [FILE|-] [opts]  browse a JSON/XML/HTML/YAML/Markdown file, foldable
   weeb version               print the build version
@@ -1035,6 +1038,19 @@ CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   exit code is non-zero when the chain is untrusted (unless -k) or expired,
   so 'weeb cert' doubles as a cron/monitoring check.
 
+AUDIT OPTIONS (weeb audit URL)  — grade a page's security headers
+  GETs the URL, follows redirects, and grades the final response's HSTS, CSP,
+  X-Content-Type-Options, clickjacking (frame-ancestors / X-Frame-Options),
+  Referrer-Policy, Permissions-Policy, COOP/CORP, Set-Cookie flags, CORS, and
+  version banners: pass / warn / fail, each with a reason. A bare host means
+  https. Exits 0 once audited (1 if unreachable); --check grades the exit.
+  -H, --header "K: V"   add a request header (repeatable)
+      --timeout DUR     request timeout (default 30s)
+      --json            emit the report as JSON; with --check, the verdict
+                        object ({check, status, code, message, metrics})
+      --check           monitoring-plugin mode: one "AUDIT WARNING - ..." line;
+                        any fail is CRITICAL, any warn WARNING (alias --nagios)
+      --persona MODE    error voice for fetch failures (see --persona above)
 VIEW (weeb view [FILE|-])  — a local jless/fx, using the response pane
   Reads FILE, or stdin when FILE is - or omitted. At a terminal it opens the
   pretty, foldable viewer: the response-pane keys plus ctrl+p pretty/raw,
@@ -1066,6 +1082,8 @@ EXAMPLES
   weeb cert ./chain.pem --host example.com
   cat chain.pem | weeb cert - --check -w 30 -c 14
   weeb https://api.example.com/health --check --expect-body '"status": *"ok"' -w 500ms -c 2s
+  weeb audit example.com
+  weeb audit https://example.com/login --check
   weeb https://api.example.com/health --check --expect-json '.status == "ok"' --expect-header '!X-Debug'
   weeb view data.json
   kubectl get pod web -o yaml | weeb view --type yaml
