@@ -128,6 +128,10 @@ func newRepeatClient(logger *log.Logger, voice ErrorChan, a cliArgs) *Client {
 	tr.MaxIdleConns = max(tr.MaxIdleConns, conc)
 	tr.DisableKeepAlives = a.fresh
 	c.http.Transport = tr
+	// BodySink requests (repeat discards bodies through one) go through the
+	// stream client, so it needs the same pool, or --fresh and the pool size
+	// would silently not apply.
+	c.stream.Transport = tr
 	c.noHistory = true
 	return c
 }
@@ -178,7 +182,6 @@ func repeatRun(ctx context.Context, c *Client, spec RequestSpec, n, conc int) re
 	// this spec, so without the clip those appends could write into one
 	// shared backing array concurrently.
 	spec.Headers = slices.Clip(spec.Headers)
-	spec.Ctx = ctx
 	spec.BodySink = io.Discard
 
 	var next atomic.Int64
@@ -188,7 +191,7 @@ func repeatRun(ctx context.Context, c *Client, spec RequestSpec, n, conc int) re
 	for range min(conc, n) {
 		wg.Go(func() {
 			for ctx.Err() == nil && next.Add(1) <= int64(n) {
-				res := c.Do(spec)
+				res := c.DoContext(ctx, spec) // ctx cancels in-flight requests (ctrl+c)
 				if res.Err != nil && ctx.Err() != nil {
 					return
 				}

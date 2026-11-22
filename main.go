@@ -62,6 +62,8 @@ func main() {
 		os.Exit(runCompletion(args[1:], os.Stdout))
 	case "history":
 		os.Exit(runHistory(args[1:]))
+	case "run":
+		os.Exit(runHTTPFile(args[1:]))
 	case "view":
 		os.Exit(runView(args[1:]))
 	}
@@ -189,6 +191,8 @@ type cliArgs struct {
 	checkJSON    bool          // --json: render the verdict as a JSON object
 	expectStatus string        // --expect-status: statuses that count as OK
 	expectBody   string        // --expect-body: Go regexp the body must match
+	expectHeader []string      // --expect-header (repeatable): 'Name', 'Name: RE', '!Name'
+	expectJSON   []string      // --expect-json (repeatable): jq-like path + comparison
 	warn, crit   time.Duration // -w/-c: response-time thresholds
 
 	// Latency benchmark (see repeat.go). repeat replaces the body output with
@@ -245,6 +249,11 @@ func runCLI(a cliArgs) int {
 		return 2
 	}
 
+	if !a.check && (len(a.expectHeader) > 0 || len(a.expectJSON) > 0) {
+		fmt.Fprintln(os.Stderr, "weeb: --expect-header/--expect-json only apply with --check")
+		return 2
+	}
+
 	// Monitoring-plugin mode: compile the assertions up front. A bad pattern
 	// or flag combination is a usage error, which in plugin-land is UNKNOWN
 	// on stdout, not weeb's usual stderr/2.
@@ -286,6 +295,9 @@ func runCLI(a cliArgs) int {
 		spec.BodySink = f
 	} else if !stdoutIsTTY() && !a.include && !a.check {
 		spec.BodySink = os.Stdout
+	}
+	if !a.check { // at a terminal, an event stream prints event by event as it arrives
+		spec.OnStream = ttyStream(a.stats, a.quiet, a.prettyOn(), a.include)
 	}
 
 	res := client.Do(spec)
@@ -340,6 +352,7 @@ func runCurlImport(args []string) int {
 	if !stdoutIsTTY() {
 		spec.BodySink = os.Stdout // piped: stream the raw bytes, uncapped
 	}
+	spec.OnStream = ttyStream(false, false, envBool("WEEB_PRETTY", true), false)
 	res := client.Do(spec)
 	return emitResult(res, false, false, envBool("WEEB_PRETTY", true), false)
 }
@@ -352,6 +365,9 @@ func runCurlImport(args []string) int {
 // server-influenced text (body, TLS leaf name, error strings); piped output
 // is the writer itself, so pipes still get the exact server bytes.
 func emitResult(res Result, wantStats, quiet, pretty, include bool) int {
+	if res.Stream != streamNone { // printed live by ttyStream; only the close is left
+		return emitStreamEnd(res, wantStats, quiet)
+	}
 	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
 
 	if !quiet && (color || wantStats) && res.Status != 0 {
@@ -768,6 +784,20 @@ func parseCLI(args []string) (cliArgs, error) {
 			}
 			a.expectBody = val
 
+		case arg == "--expect-header":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.expectHeader = append(a.expectHeader, val)
+
+		case arg == "--expect-json":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.expectJSON = append(a.expectJSON, val)
+
 		case arg == "-w" || arg == "--warn", arg == "-c" || arg == "--crit":
 			val, err := nextArg(args, &i, arg)
 			if err != nil {
@@ -897,6 +927,7 @@ USAGE
   weeb curl '<curl cmd>'     run a pasted curl command (import)
   weeb completion zsh|bash   print shell completion script
   weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
+  weeb run FILE [NAME|N]     list the requests in a .http file / run one
   weeb view [FILE|-] [opts]  browse a JSON/XML/HTML/YAML/Markdown file, foldable
   weeb version               print the build version
 
@@ -917,7 +948,8 @@ OPTIONS
       --timeout DUR     request timeout, e.g. 10s, 500ms (default 30s). For
                         streamed bodies (-o / piped) the default bounds the wait
                         for headers, not the transfer; an explicit --timeout
-                        caps the whole transfer
+                        caps the whole transfer. For event streams (see
+                        STREAMING) it is an idle timeout instead
       --no-follow       don't follow redirects — show the 3xx response itself
                         (status, Location header, body); by default weeb follows
                         up to 10 redirects (implies headless)
@@ -952,11 +984,36 @@ MONITORING (--check; a check_http replacement)
       --expect-status S statuses that count as OK: codes, ranges, or classes,
                         e.g. "200", "200-204,301", "2xx" (default: any < 400)
       --expect-body RE  CRITICAL unless the body matches this Go regexp
+      --expect-header H CRITICAL unless the response header is: 'Name' present,
+                        'Name: RE' present with a value matching the Go regexp,
+                        or '!Name' absent (repeatable)
+      --expect-json EXPR
+                        CRITICAL unless the JSON body satisfies EXPR, a jq-like
+                        path with an optional comparison (repeatable):
+                          '.status == "ok"'   '.items[0].id != null'
+                          '.count > 0'        '.version =~ "^2\."'
+                          '.data.items | length >= 1'
+                          '.a.b'  bare: must exist and be neither null nor false
+                        paths: .key  .["any key"]  [N]  [-1] (from the end);
+                        values are JSON literals; ops: == != < <= > >= =~ (a
+                        quoted Go regexp); '| length' is the one function. A
+                        non-JSON body is CRITICAL; a bad EXPR is UNKNOWN
   -w, --warn DUR        WARNING when the request takes longer, e.g. 500ms
   -c, --crit DUR        CRITICAL when the request takes longer, e.g. 2s
       --json            render the verdict as one JSON object instead of the
                         plugin line — {check, status, code, message, metrics}
                         — same exit code (for script_exporter & friends)
+                        HTTP verdicts also list "assertions": each one's type,
+                        expect, ok, and actual value (clipped)
+
+STREAMING (text/event-stream, application/x-ndjson, jsonl, json-seq)
+  Event streams render live as each event arrives. At a terminal (and in the
+  TUI) each SSE event prints as a block, event:/id: on one line and JSON data
+  pretty-printed; each NDJSON line is its own block. Piped or -o gets the exact
+  bytes as they arrive. The default timeout bounds only the wait for headers,
+  never the stream; an explicit --timeout ends a stream after DUR with no
+  data. In the TUI, esc stops a stream and keeps what arrived; the pane keeps
+  the newest 2000 events (at most 4 MB).
 
 BENCHMARK (--repeat; a latency mini-benchmark)
       --repeat N        send the request N times and print a summary on stdout
@@ -977,6 +1034,18 @@ CURL IMPORT (weeb curl '<command>')
   flags (-L, -k, --compressed, …) are ignored. The command may be one quoted
   string or already shell-split.
     weeb curl 'curl -X POST https://api.example.com/u -H "Accept: application/json" -d @body.json'
+
+HTTP FILES (weeb run FILE.http [NAME|N])
+  Run requests from a VS Code REST Client / JetBrains HTTP Client .http file.
+  With no NAME or N, list the requests; otherwise run one: the TUI opens
+  prefilled at a terminal, headless when piped. Supports ### separators,
+  # @name, @var = value, {{var}}, {{$processEnv VAR}} / {{$env.VAR}}, ?/& query
+  lines and < ./file body includes. Response chaining isn't supported.
+      --env NAME        take variables from environment NAME in
+                        http-client.env.json (+ http-client.private.env.json)
+      --no-tui          run headless even at a terminal (alias --headless)
+    weeb run api.http             list the requests
+    weeb run api.http login       run the request named login (or by number: 1)
 
 CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   -k, --insecure        inspect even if the chain is untrusted/expired
@@ -1044,13 +1113,15 @@ EXAMPLES
   weeb https://api.example.com/health --check --expect-body '"status": *"ok"' -w 500ms -c 2s
   weeb https://api.example.com/health --repeat 200 --concurrency 8
   weeb https://api.example.com/health --repeat 50 --fresh --json | jq .phases.tls
+  weeb https://api.example.com/health --check --expect-json '.status == "ok"' --expect-header '!X-Debug'
   weeb view data.json
   kubectl get pod web -o yaml | weeb view --type yaml
   weeb view data.json > pretty.json
 
 TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
-  ctrl+s send · ctrl+t inspect TLS cert · ctrl+x export as curl · ctrl+p pretty · ctrl+y 🌈 · ctrl+g debug
+  ctrl+s send · esc stop a request/stream · ctrl+t inspect TLS cert · ctrl+x export as curl
+  ctrl+p pretty · ctrl+y 🌈 · ctrl+g debug
   in the response pane: ↑↓ scroll · ←→ select section or node (JSON/XML/HTML/YAML) · enter fold · -/+ fold all
   y copy the node's path (jq/XPath) · Y copy its value · ctrl+x also copies the curl (clipboard via OSC 52)
 

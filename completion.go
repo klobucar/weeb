@@ -13,7 +13,7 @@ import (
 // a subcommand or flag is added (to main's dispatch, parseCLI, or runCert),
 // extend the matching slice here and every shell picks it up.
 var (
-	completionSubcommands = []string{"cert", "curl", "completion", "history", "view", "version", "help"}
+	completionSubcommands = []string{"cert", "curl", "completion", "history", "view", "version", "help", "run"}
 	completionMethods     = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 	// Flags of a plain `weeb [METHOD] URL …` invocation (see parseCLI).
 	completionMainFlags = []string{
@@ -22,6 +22,7 @@ var (
 		"-q", "--quiet", "--persona", "--to-curl", "-o", "--output",
 		"--max-body", "-h", "--help",
 		"--repeat", "--concurrency", "--fresh", "--json",
+		"--expect-header", "--expect-json",
 	}
 	// Flags accepted after `weeb cert` (see runCert).
 	completionCertFlags = []string{
@@ -92,6 +93,7 @@ _weeb() {
   case "${words[2]}" in
     cert|tls)   _arguments $certflags '*:host:_hosts' ;;
     completion) (( CURRENT == 3 )) && compadd zsh bash ;;
+    run)        _files -g '*.http' ;;
     view)       _arguments $viewflags '*:file:_files' ;;
     curl|import|version|help) ;;
     *)          _arguments $mainflags '*:url:_urls' ;;
@@ -145,6 +147,7 @@ _weeb() {
   case "${COMP_WORDS[1]}" in
     cert|tls)   COMPREPLY=($(compgen -W "$certflags" -- "$cur")) ;;
     completion) COMPREPLY=($(compgen -W "zsh bash" -- "$cur")) ;;
+    run)        COMPREPLY=($(compgen -f -X '!*.http' -- "$cur") $(compgen -d -- "$cur")) ;;
     view)       COMPREPLY=($(compgen -W "$viewflags" -- "$cur") $(compgen -f -- "$cur")) ;;
     curl|import|version|help) ;;
     *)          COMPREPLY=($(compgen -W "$mainflags" -- "$cur")) ;;

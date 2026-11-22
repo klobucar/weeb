@@ -44,7 +44,9 @@ own site, leaf → ISRG Root:
 
 - **curl-shaped CLI** — `-H`, `-d @file`/`-`/stdin, `-X`, interleaved flags and positionals, just like you already type.
 - **curl import & export** — paste a `curl` command to run it (`weeb curl '…'`), or turn any request into one (`--to-curl`, or `ctrl+x` in the TUI).
+- **`.http` files** — run requests from VS Code REST Client / JetBrains HTTP Client files (`weeb run api.http login`).
 - **Pretty bodies** — JSON, XML, HTML & YAML get syntax color and **collapsible folding**; Markdown gets a full [Glamour](https://github.com/charmbracelet/glamour) render. `--raw` for the exact bytes.
+- **Live streams** — Server-Sent Events and NDJSON (hello, LLM APIs) render event by event as they arrive, in the TUI and at the terminal.
 - **File viewer** — `weeb view data.json` (or `… | weeb view`) browses a local JSON/XML/HTML/YAML/Markdown file in the same foldable pane, like jless or fx; piped, it's a pretty-printer.
 - **TLS inspection** — a friendlier `openssl s_client`: full chain, expiry, SANs, ciphers, OCSP/SCT, plus `--starttls`, `--sni` override, `--alpn`, version pinning, client certs, and `--pem` dump.
 - **Timing breakdown** — per-phase DNS / TCP / TLS / send / wait / recv stats with a colored bar.
@@ -102,7 +104,7 @@ In headless mode the response **body** goes to stdout; weeb's errors, logs, and
 | `-H, --header "K: V"` | Add a request header (repeatable) |
 | `-d, --data DATA` | Body: `@file`, `-` (stdin), or a literal string |
 | `-X, --request METHOD` | Set the method explicitly |
-| `--timeout DUR` | Request timeout, e.g. `10s`, `500ms` (default 30s) |
+| `--timeout DUR` | Request timeout, e.g. `10s`, `500ms` (default 30s); an idle timeout for event streams (see [Streaming](#streaming-sse--ndjson)) |
 | `-v, --stats` | Print timing + negotiated TLS to stderr, even when piping |
 | `--pretty` | Force the pretty/colored body view (the default at a TTY) |
 | `--raw` | Force raw output — exactly the bytes the server sent (implies `--no-tui`) |
@@ -142,6 +144,32 @@ In the response pane, fold to cut the noise:
 | `enter` | Fold / unfold the selection |
 | `-` / `+` | Fold / unfold everything |
 
+## Streaming (SSE & NDJSON)
+
+Server-Sent Events (`text/event-stream`) and JSON lines (`application/x-ndjson`,
+`application/jsonl`, `application/json-seq`), the shapes most LLM APIs stream
+in, render live as each event arrives, not after the server closes the stream:
+
+- **TUI**: each SSE event is a block, with its `event:`/`id:` on one compact
+  line and its `data:` pretty-printed and colored when it's JSON. Each NDJSON
+  line is a block of its own. The status line counts events as they arrive
+  (`streaming… 42 events`). The pane follows the newest event; scroll up to
+  pause that, and scroll back to the bottom to resume. `esc` stops the stream:
+  the connection closes, everything received stays on screen, and weeb keeps
+  running. `ctrl+p` flips between the blocks and the raw lines.
+- **CLI at a terminal**: the same blocks print as each event arrives. The status
+  goes to stderr when the stream starts, and the timing when it ends.
+- **Piped or `-o`**: the exact bytes as received, as they arrive.
+
+A stream can run as long as the server keeps it open, so the 30s default
+timeout bounds only the wait for the response headers, never the stream. An
+explicit `--timeout DUR` is an **idle timeout** for a stream: it ends with an
+error once DUR passes with no data. For every other response, `--timeout`
+still caps the whole request.
+
+The TUI keeps the newest 2000 events (at most 4 MB, less if `--max-body` is
+lower) and notes how many older ones it dropped. A single event over 1 MB
+(or `--max-body`) is cut and marked.
 ## Viewing files
 
 `weeb view` points the response pane at a local file instead of a request, so
@@ -214,6 +242,76 @@ weeb POST https://api.example.com/users -H "Accept: application/json" -d '{"a":1
 
 In the TUI, `ctrl+x` shows the curl equivalent of the current form and copies
 it to your clipboard.
+
+## .http files
+
+`weeb run` reads `.http` files, the plain-text request format shared by the
+VS Code REST Client and the JetBrains HTTP Client, so a collection that lives
+in your repo runs from the terminal too:
+
+```http
+@base = https://api.example.com
+@token = {{$processEnv API_TOKEN}}
+
+### Log in
+# @name login
+POST {{base}}/login
+Content-Type: application/json
+
+< ./login.json
+
+### Who am I?
+# @name me
+GET {{base}}/me
+    ?fields=id,name
+    &verbose=true
+Authorization: Bearer {{token}}
+Accept: application/json
+```
+
+```sh
+weeb run api.http                # list: index, name or title, method, URL
+weeb run api.http me             # run one by @name…
+weeb run api.http 2              # …or by number
+weeb run api.http me --env dev   # with variables from http-client.env.json
+```
+
+At a terminal the request opens in the TUI, prefilled and ready to send;
+piped (or with `--no-tui`) it runs headless, body to stdout. `WEEB_HEADERS`
+and `WEEB_TOKEN` apply as they do to any request.
+
+What's understood:
+
+- `###` separates requests; text after it is a title. `# @name NAME` (or
+  `// @name NAME`) names one, and `# @no-redirect` shows a 3xx instead of
+  following it.
+- `[METHOD] URL [HTTP/version]`, where the method defaults to `GET`, followed
+  by optional `?…`/`&…` query lines, then headers up to a blank line, then
+  the body up to the next `###`. Other `#` and `//` lines are comments before
+  the request line and among headers; in a body they're sent as written.
+- `< ./file` includes a file as the body (or part of it) byte for byte;
+  `<@ ./file` substitutes variables in it first. Paths are relative to the
+  `.http` file. Multipart bodies are sent with CRLF line endings.
+- `@name = value` defines a file variable, used as `{{name}}` in the URL,
+  headers and body; values can use other variables.
+- `{{$processEnv VAR}}` (VS Code) and `{{$env.VAR}}` (JetBrains) read
+  environment variables. `{{$guid}}`/`{{$uuid}}`, `{{$timestamp}}` and
+  `{{$isoTimestamp}}` are generated.
+- `--env NAME` takes variables from environment `NAME` in
+  `http-client.env.json` next to the file, merged with
+  `http-client.private.env.json` and the `$shared` environment. File
+  variables win over environment-file ones.
+
+An undefined variable is an error naming the variable and its line. Values
+read from environment variables (and the private env file) never appear in
+the listing, which shows `{{$processEnv TOKEN}}` as written, or in weeb's
+errors and logs, which show the reference in place of the value.
+
+Not supported: response chaining (`{{login.response.body.$.token}}` is an
+error, so run the requests separately), JetBrains pre-request and response
+handler scripts (skipped; a variable a script would set is reported as
+undefined), `@prompt`, and other dynamic variables such as `$randomInt` or
+`$datetime`.
 
 ## History
 
@@ -325,6 +423,38 @@ regexp; no match is CRITICAL. The HTTP perfdata always includes the leaf
 cert's `days_until_expiry` on TLS connections, so one check can feed both
 latency and expiry alerting.
 
+Headers and JSON fields can be asserted too. Both flags repeat, and any
+failure is CRITICAL:
+
+```sh
+weeb https://api.example.com/health --check \
+  --expect-header 'Content-Type: ^application/json' --expect-header '!X-Debug' \
+  --expect-json '.status == "ok"' --expect-json '.data.items | length >= 1'
+# HTTP CRITICAL - json .status == "ok": got "degraded" (+1 more failed)|time=0.123s;; size=512B days_until_expiry=87
+```
+
+| Flag | Passes when |
+|------|-------------|
+| `--expect-header 'Name'` | the response has the header |
+| `--expect-header 'Name: RE'` | the header is present and a value matches the Go regexp |
+| `--expect-header '!Name'` | the header is absent |
+| `--expect-json 'EXPR'` | the body is JSON and satisfies `EXPR` |
+
+`EXPR` is a small jq-like path with an optional comparison:
+`.status == "ok"`, `.items[0].id != null`, `.count > 0`,
+`.version =~ "^2\."`, `.data.items | length >= 1`. A bare path such as
+`.a.b` must exist and be neither `null` nor `false`. Paths take `.key`,
+`.["key with spaces"]` and `[N]` (negative counts from the end); values are
+JSON literals; the operators are `==`, `!=`, `<`, `<=`, `>`, `>=` (numbers or
+strings) and `=~` (a double-quoted Go regexp, backslashes passed through as
+written). `| length` is the only function. As in jq, a missing key reads as
+`null`. A body that isn't JSON is CRITICAL, and the body is the one already
+read, so `--max-body` still caps it. A malformed expression or header spec is
+UNKNOWN, like a bad `--expect-status`, with the column it went wrong at.
+
+The plugin line reports the first failure (status, then `--expect-body`,
+headers and JSON in flag order) and counts the rest.
+
 Prefer structured output? Add `--json` and the same verdict (same exit code)
 comes back as one JSON object instead of the plugin line:
 
@@ -334,9 +464,14 @@ weeb https://api.example.com/health --check --json -w 500ms | jq .
 #   "check": "http", "status": "OK", "code": 0,
 #   "message": "200 OK in 123 ms, 512 bytes",
 #   "metrics": { "http_status": 200, "time_ms": 123, "size_bytes": 512,
-#                "warn_ms": 500, "days_until_expiry": 87 }
+#                "warn_ms": 500, "days_until_expiry": 87 },
+#   "assertions": [ { "type": "status", "expect": "status < 400",
+#                     "ok": true, "actual": "200" } ]
 # }
 ```
+
+`assertions` lists every assertion in order with its outcome, the observed
+value (clipped to 80 characters), and for failures the message.
 
 Note the distinction on the cert side: plain `weeb cert HOST --json` emits the
 full *report* (chain, SANs, fingerprints — no verdict), while
@@ -409,6 +544,7 @@ request. Repeated requests aren't recorded in `weeb history`.
 | `←` / `→` | Pick HTTP method (when the method field is focused) |
 | `ctrl+o` / `ctrl+r` | Add / remove a header row |
 | `ctrl+s` | Send the request |
+| `esc` | Stop the request in flight; a stream ends and keeps what arrived |
 | `ctrl+t` | Inspect the TLS cert |
 | `ctrl+x` | Export the current request as `curl` and copy it to the clipboard |
 | `y` / `Y` | Copy the selected node's path / value (response pane only) |
