@@ -1004,6 +1004,7 @@ TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
   ctrl+s send · ctrl+t inspect TLS cert · ctrl+x export as curl · ctrl+p pretty · ctrl+y 🌈 · ctrl+g debug
   in the response pane: ↑↓ scroll · ←→ select section or node (JSON/XML/HTML/YAML) · enter fold · -/+ fold all
+  y copy the node's path (jq/XPath) · Y copy its value · ctrl+x also copies the curl (clipboard via OSC 52)
 
 ENVIRONMENT (prefills, applied unless you override them)
   WEEB_BASE_URL    relative URLs ("/me") resolve against this base
