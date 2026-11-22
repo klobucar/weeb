@@ -178,6 +178,31 @@ func (m *model) addBodySection(summary, body string, tree *bnode, xtree *xnode, 
 	})
 }
 
+// addRenderedBody renders body and appends it as the Body section. With pretty
+// on, JSON/XML/HTML/YAML also get a fold tree for structural collapsing and
+// colorized rendering; with pretty off the body is shown raw (no tree, no
+// reformat — see renderBody). HTTP responses and `weeb view` documents both
+// come through here, so they render and fold identically.
+func (m *model) addRenderedBody(body []byte, contentType, url, summary string) {
+	var tree *bnode
+	var xtree *xnode
+	var ytree *ynode
+	if m.pretty {
+		switch detectFormat(contentType, url, body, true) {
+		case fmtJSON:
+			tree = parseJSONTree(body, contentType, url, true)
+		case fmtXML:
+			xtree = parseXMLTree(body, contentType, url, true)
+		case fmtHTML:
+			xtree = parseHTMLTree(body, contentType, url, true)
+		case fmtYAML:
+			ytree = parseYAMLTree(body, contentType, url, true)
+		}
+	}
+	m.addBodySection(summary,
+		renderBody(body, contentType, url, m.styles, true, m.pretty, m.resp.Width()), tree, xtree, ytree)
+}
+
 // foldNode is a collapsible node in a parsed body tree — a JSON value (*bnode)
 // or an XML/HTML element (*xnode). The fold-cursor machinery walks bodies through
 // this interface so it never has to know which kind of tree it's stepping over.

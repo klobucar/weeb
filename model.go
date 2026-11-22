@@ -127,8 +127,17 @@ type model struct {
 	respCursor   int
 	foldState    map[string]bool
 
+	// status is a transient message shown in place of the key help (e.g.
+	// "copied curl to clipboard"); statusSeq pairs it with its clear timer.
+	status    string
+	statusSeq int
+
 	width, height int
 	ready         bool
+
+	// viewer is set by `weeb view` (view.go): the pane shows a local document
+	// and there is no request form.
+	viewer *viewDoc
 }
 
 func newModel(client *Client, logger *log.Logger, dbg *safeBuffer) model {
@@ -245,6 +254,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
 		m.layout()
+		if m.viewer != nil {
+			m.viewerResized() // `weeb view`: render or re-wrap at the new width
+		}
 		return m, nil
 
 	case frameMsg:
@@ -276,7 +288,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderCert(msg)
 		return m, nil
 
+	case statusClearMsg:
+		if msg.seq == m.statusSeq {
+			m.status = ""
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
+		// `weeb view` has no form: its own keys first; the rest (scroll,
+		// folding, 🌈, quit) fall through to the shared handling below.
+		if m.viewer != nil {
+			if cmd, ok := m.viewerKey(msg); ok {
+				return m, cmd
+			}
+		}
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
@@ -331,7 +356,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.respHeading = "curl ⤵  (ctrl+x back)"
 			m.setResp(renderCurl(resolveSpec(m.specFromForm()), m.styles, true, true))
 			m.resp.GotoTop()
-			return m, nil
+			// Also copy it, unstyled: the same text --to-curl prints. A runnable
+			// curl carries the credentials (WEEB_TOKEN's Authorization included),
+			// and clipboard managers keep history, so the status says so rather
+			// than copying a secret silently.
+			spec := resolveSpec(m.specFromForm())
+			what := "curl"
+			if specHasCredentials(spec) {
+				what = "curl (includes credentials)"
+			}
+			cmd := m.copyText(what, toCurl(spec, true))
+			return m, cmd
 
 		case key.Matches(msg, m.keys.NextField):
 			m.cycleFocus(1)
@@ -391,6 +426,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case focResponse:
+			// Copy keys are plain letters, so they only live here, never while
+			// a text field is focused; copySelection says when there's nothing.
+			if key.Matches(msg, m.keys.CopyPath, m.keys.CopyValue) {
+				cmd := m.copySelection(key.Matches(msg, m.keys.CopyValue))
+				return m, cmd
+			}
 			// Fold controls take precedence over viewport scrolling, whenever the
 			// pane has foldable sections (HTTP response or the TLS cert view).
 			if m.hasSections() {
@@ -764,6 +805,9 @@ func (m model) renderMethodSelector() string {
 }
 
 func (m model) renderForm() string {
+	if m.viewer != nil {
+		return m.renderViewerTop() // `weeb view` has no request form
+	}
 	cur := m.currentFocus()
 	var b strings.Builder
 
@@ -809,6 +853,9 @@ func (m model) renderHelpLine() string {
 		}
 		return m.spinner.View() + " " + m.styles.hint.Render(label)
 	}
+	if m.status != "" {
+		return m.statusLine()
+	}
 
 	pairs := [][2]string{
 		{"ctrl+s", "send"}, {"ctrl+t", "cert"}, {"ctrl+x", "curl"}, {"ctrl+p", "pretty"},
@@ -842,13 +889,13 @@ func (m model) renderResponsePane() string {
 	title := m.respHeading
 	if m.currentFocus().kind == focResponse {
 		if m.hasSections() {
-			title += "  (↑↓ scroll · ←→ select · enter fold · ± all)"
+			title += "  (↑↓ scroll · ←→ select · enter fold · ± all · y/Y copy)"
 		} else {
 			title += "  (↑↓ scroll)"
 		}
 	}
 	inner := m.resp.View()
-	if m.pane == paneResponse && m.lastResult == nil && !m.inFlight {
+	if m.pane == paneResponse && m.lastResult == nil && !m.inFlight && m.viewer == nil {
 		inner = m.emptyState() // nothing sent yet: show a placeholder, not a blank box
 	}
 	box := lipgloss.NewStyle().
@@ -939,27 +986,9 @@ func (m *model) renderResult(r Result) {
 		}
 		m.addSection("Headers", fmt.Sprintf("%d", len(keys)), strings.TrimRight(hb.String(), "\n"))
 
-		// Body: the response payload. With pretty on, JSON/XML/HTML get a fold
-		// tree for structural collapsing and colorized rendering. With pretty off
-		// the body is shown raw (no tree, no reformat) — see renderBody.
+		// Body: the response payload (see addRenderedBody).
 		if len(r.Body) > 0 {
-			var tree *bnode
-			var xtree *xnode
-			var ytree *ynode
-			if m.pretty {
-				switch detectFormat(r.ContentType, r.URL, r.Body, true) {
-				case fmtJSON:
-					tree = parseJSONTree(r.Body, r.ContentType, r.URL, true)
-				case fmtXML:
-					xtree = parseXMLTree(r.Body, r.ContentType, r.URL, true)
-				case fmtHTML:
-					xtree = parseHTMLTree(r.Body, r.ContentType, r.URL, true)
-				case fmtYAML:
-					ytree = parseYAMLTree(r.Body, r.ContentType, r.URL, true)
-				}
-			}
-			m.addBodySection(bodySummary(len(r.Body), r.ContentType),
-				renderBody(r.Body, r.ContentType, r.URL, m.styles, true, m.pretty, m.resp.Width()), tree, xtree, ytree)
+			m.addRenderedBody(r.Body, r.ContentType, r.URL, bodySummary(len(r.Body), r.ContentType))
 		}
 	}
 
