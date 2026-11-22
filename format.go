@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -202,9 +204,32 @@ func renderBody(body []byte, contentType, url string, st styles, color, pretty b
 	}
 }
 
+// glamour's cost grows exponentially with blockquote depth and polynomially
+// with list depth: a 96-byte body of 90 nested '>' took 5s and rendered 5.8 MB,
+// ~100 levels took minutes and gigabytes, and the TUI renders synchronously.
+// Real documents nest a handful of levels, so a body past either limit is
+// shown as its raw source instead.
+const (
+	maxMarkdownNesting = 16
+	maxMarkdownBytes   = 1 << 20
+)
+
+var errMarkdownTooComplex = errors.New("weeb: markdown too large or deeply nested to render")
+
 // renderMarkdown renders a markdown body to ANSI-styled terminal text via
 // glamour, wrapped to width (clamped to a readable range).
-func renderMarkdown(body []byte, width int) (string, error) {
+func renderMarkdown(body []byte, width int) (out string, err error) {
+	if len(body) > maxMarkdownBytes || markdownTooDeep(body, maxMarkdownNesting) {
+		return "", errMarkdownTooComplex
+	}
+	// glamour and lipgloss run on a hostile server's bytes; a panic in them
+	// (lipgloss's WrapWriter has nil-derefed on a 10-byte body) must cost the
+	// styled render, not crash weeb.
+	defer func() {
+		if p := recover(); p != nil {
+			out, err = "", fmt.Errorf("weeb: markdown renderer panicked: %v", p)
+		}
+	}()
 	if width <= 0 || width > 120 {
 		width = 100
 	}
@@ -216,11 +241,86 @@ func renderMarkdown(body []byte, width int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := r.Render(string(body))
+	s, err := r.Render(string(body))
 	if err != nil {
 		return "", err
 	}
-	return strings.Trim(out, "\n"), nil
+	return strings.Trim(s, "\n"), nil
+}
+
+// markdownTooDeep reports whether some line of body opens more than limit
+// nested containers (blockquotes, list items, definition descriptions).
+// CommonMark puts a line k containers deep only if it carries all k prefixes —
+// a '>' per blockquote, a marker or at least two columns of indentation per
+// list item — and a line with no marker can't open a container, so counting a
+// marker line's markers plus half its indentation never undercounts. It can
+// overcount (wide list indents, list-like lines in code), which only costs a
+// raw render.
+func markdownTooDeep(body []byte, limit int) bool {
+	for len(body) > 0 {
+		line := body
+		if i := bytes.IndexByte(body, '\n'); i >= 0 {
+			line, body = body[:i], body[i+1:]
+		} else {
+			body = nil
+		}
+		markers, cols := 0, 0
+		afterMarker := false // the one space after a marker belongs to it
+	scan:
+		for i := 0; i < len(line); {
+			switch c := line[i]; {
+			case c == ' ':
+				if !afterMarker {
+					cols++
+				}
+				afterMarker = false
+				i++
+			case c == '\t':
+				cols += 4 // reaches the next tab stop: at most 4 columns
+				afterMarker = false
+				i++
+			case c == '>':
+				markers++
+				afterMarker = true
+				i++
+			default:
+				n := mdMarkerLen(line[i:])
+				if n == 0 {
+					break scan
+				}
+				markers++
+				afterMarker = true
+				i += n
+			}
+		}
+		if markers > 0 && markers+cols/2 > limit {
+			return true
+		}
+	}
+	return false
+}
+
+// mdMarkerLen returns the length of the list-item marker ("-", "*", "+", or
+// 1–9 digits then "." or ")") or definition marker (":") at the start of s
+// when whitespace or the end of the line follows it, else 0.
+func mdMarkerLen(s []byte) int {
+	n := 0
+	switch {
+	case s[0] == '-' || s[0] == '*' || s[0] == '+' || s[0] == ':':
+		n = 1
+	default:
+		for n < len(s) && n < 9 && s[n] >= '0' && s[n] <= '9' {
+			n++
+		}
+		if n == 0 || n == len(s) || (s[n] != '.' && s[n] != ')') {
+			return 0
+		}
+		n++
+	}
+	if n < len(s) && s[n] != ' ' && s[n] != '\t' && s[n] != '\r' {
+		return 0
+	}
+	return n
 }
 
 // lenientXMLDecoder builds the decoder shared by the flat pretty-print and the
@@ -236,14 +336,45 @@ func lenientXMLDecoder(body []byte) *xml.Decoder {
 	return dec
 }
 
+// Pretty-printing repeats each line's indentation, so a deeply nested body's
+// indented form grows as lines × depth (a 21 KB XML body indented to 18 MB; a
+// 1 MB one would need tens of GB). Real documents grow a few times at most, so
+// past prettyCap the flat renderers show the body raw. The floor keeps small
+// bodies with legitimately deep structure pretty.
+const (
+	maxPrettyGrowth = 8
+	minPrettyCap    = 1 << 20
+)
+
+// prettyCap is the most bytes a pretty-printed body of n bytes may take.
+func prettyCap(n int) int { return max(minPrettyCap, maxPrettyGrowth*n) }
+
+var errPrettyTooBig = errors.New("weeb: pretty-printed body exceeds its size cap")
+
+// capWriter passes writes through to w until n bytes are used up, then fails,
+// so an encoder producing runaway output stops early instead of allocating it.
+type capWriter struct {
+	w io.Writer
+	n int // bytes still allowed
+}
+
+func (c *capWriter) Write(p []byte) (int, error) {
+	if len(p) > c.n {
+		return 0, errPrettyTooBig
+	}
+	c.n -= len(p)
+	return c.w.Write(p)
+}
+
 // prettyXML reindents XML/HTML using a tokenizer. It is lenient (HTML autoclose
 // and entities) so it survives most real-world HTML; it returns ok=false if the
-// input can't be tokenized, so the caller can fall back to raw.
+// input can't be tokenized or its indented form would pass prettyCap, so the
+// caller can fall back to raw.
 func prettyXML(body []byte) (string, bool) {
 	dec := lenientXMLDecoder(body)
 
 	var out bytes.Buffer
-	enc := xml.NewEncoder(&out)
+	enc := xml.NewEncoder(&capWriter{w: &out, n: prettyCap(len(body))})
 	enc.Indent("", "  ")
 
 	for {
