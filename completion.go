@@ -23,6 +23,7 @@ var (
 		"--max-body", "-h", "--help",
 		"-k", "--insecure", "--cacert", "-E", "--cert", "--key",
 		"-F", "--form", "--form-string", "-b", "--cookie", "--cookie-jar",
+		"--repeat", "--concurrency", "--fresh", "--json",
 		"--expect-header", "--expect-json",
 	}
 	// Flags accepted after `weeb cert` (see runCert).

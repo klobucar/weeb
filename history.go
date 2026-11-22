@@ -88,7 +88,7 @@ func redactedHeaderKey(key string) bool {
 // logged through THE RECORD and otherwise ignored, so history can never break
 // a request. Called (deferred) from Do once the send was actually attempted.
 func (c *Client) recordHistory(spec RequestSpec, res Result) {
-	if !historyEnabled() {
+	if c.noHistory || !historyEnabled() {
 		return
 	}
 	if err := appendHistory(newHistoryEntry(spec, res)); err != nil {

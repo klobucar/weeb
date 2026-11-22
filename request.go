@@ -212,6 +212,11 @@ type Client struct {
 	// TUI sends from a goroutine, hence the lock.
 	trMu       sync.Mutex
 	transports map[tlsTransportKey]*http.Transport
+
+	// noHistory skips history recording. --repeat sets it: N copies of one
+	// request would push real entries out of the capped file, and
+	// concurrent appends would race its rewrite.
+	noHistory bool
 }
 
 func newClient(logger *log.Logger, voice ErrorChan) *Client {
