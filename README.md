@@ -50,6 +50,7 @@ own site, leaf → ISRG Root:
 - **File viewer** — `weeb view data.json` (or `… | weeb view`) browses a local JSON/XML/HTML/YAML/Markdown file in the same foldable pane, like jless or fx; piped, it's a pretty-printer.
 - **TLS inspection** — a friendlier `openssl s_client`: full chain, expiry, SANs, ciphers, OCSP/SCT, plus `--starttls`, `--sni` override, `--alpn`, version pinning, client certs, and `--pem` dump.
 - **Timing breakdown** — per-phase DNS / TCP / TLS / send / wait / recv stats with a colored bar.
+- **Security headers audit** — `weeb audit URL` grades HSTS, CSP, cookies, CORS and more, pass/warn/fail with a reason each; `--check` turns it into a monitoring plugin.
 - **Two outputs, kept apart** — a human-facing error *voice* (configurable, optionally anime) and structured *logs* to a file.
 - **🌈 mode** — because sometimes you want rainbow vomit. `ctrl+y`.
 
@@ -483,6 +484,54 @@ is one. If you want these numbers in Prometheus anyway, `weeb cert --json`
 plus the node_exporter textfile collector is a one-line cron job, or wire
 `--check` output through
 [script_exporter](https://github.com/ricoberger/script_exporter).
+
+## Security headers audit
+
+`weeb audit` fetches a page the way a browser lands on it (a GET, redirects
+followed) and grades the security headers of the final response:
+
+```sh
+weeb audit example.com                    # a bare host means https
+weeb audit https://example.com/login --json | jq '.findings[] | select(.grade != "pass")'
+weeb audit https://example.com --check
+# AUDIT WARNING - 0 fail, 3 warn: Permissions-Policy (missing, so …); …|pass=8 warn=3 fail=0
+```
+
+| Check | Pass | Warn | Fail |
+|-------|------|------|------|
+| `Strict-Transport-Security` | max-age ≥ 6 months with includeSubDomains | shorter max-age, no includeSubDomains, `preload` without the preload list's requirements | missing, no or zero max-age, page served over plain http |
+| `Content-Security-Policy` | scripts restricted | `'unsafe-inline'` (without a nonce or hash), `'unsafe-eval'`, wildcard script sources (`*`, `https:`, …), no script-src/default-src, report-only | missing |
+| `X-Content-Type-Options` | `nosniff` | | missing or any other value |
+| Clickjacking | CSP `frame-ancestors`, or `X-Frame-Options` `DENY`/`SAMEORIGIN` | `ALLOW-FROM`, conflicting values | neither, or `frame-ancestors *` |
+| `Referrer-Policy` | `no-referrer`, `same-origin`, `strict-origin`, `strict-origin-when-cross-origin` | missing, `origin`, `origin-when-cross-origin`, `no-referrer-when-downgrade` | `unsafe-url` |
+| `Permissions-Policy` | set | missing, or only the legacy `Feature-Policy` | |
+| `Cross-Origin-Opener-Policy` | `same-origin`, `same-origin-allow-popups` | missing, `unsafe-none` | |
+| `Cross-Origin-Resource-Policy` | `same-origin`, `same-site` | missing, `cross-origin` | |
+| `Set-Cookie` | every cookie `Secure`, `HttpOnly` and `SameSite` | a cookie without `HttpOnly` or `SameSite` | a cookie without `Secure` |
+| CORS | no CORS headers, or `*` without credentials | `Allow-Origin: null` | `*` or `null` with `Allow-Credentials: true` |
+| Info leaks | no version in `Server` | a version in `Server`; any `X-Powered-By`/`X-AspNet-Version` | |
+
+`preload` is noted but not required: joining the HSTS preload list is an
+opt-in commitment that is slow to undo. When a response carries several CSP
+policies, a weakness counts only if every enforced policy has it, because
+browsers enforce them all.
+
+At a terminal the report is a colored table; `--json` emits
+`{url, status, redirects, findings: [{id, name, grade, reason, value}], pass, warn, fail}`.
+The exit code is 0 once the audit ran and 1 if the page couldn't be fetched.
+`--check` (alias `--nagios`) is the graded mode: one plugin line, WARNING on
+any warn, CRITICAL on any fail, UNKNOWN when the page is unreachable; add
+`--json` for the verdict object. Header values are server-controlled, so they
+are sanitized at a terminal and flattened in the plugin line, and `Set-Cookie`
+values (session credentials) are never echoed, only cookie names.
+
+| Flag | Description |
+|------|-------------|
+| `-H, --header "K: V"` | Add a request header (repeatable) |
+| `--timeout DUR` | Request timeout (default 30s) |
+| `--json` | Emit the report as JSON; with `--check`, the verdict object |
+| `--check` | Monitoring-plugin mode (alias `--nagios`) |
+| `--persona MODE` | Error voice for fetch failures |
 
 ## TUI keys
 
