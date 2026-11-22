@@ -50,6 +50,7 @@ own site, leaf → ISRG Root:
 - **File viewer** — `weeb view data.json` (or `… | weeb view`) browses a local JSON/XML/HTML/YAML/Markdown file in the same foldable pane, like jless or fx; piped, it's a pretty-printer.
 - **TLS inspection** — a friendlier `openssl s_client`: full chain, expiry, SANs, ciphers, OCSP/SCT, plus `--starttls`, `--sni` override, `--alpn`, version pinning, client certs, and `--pem` dump.
 - **Timing breakdown** — per-phase DNS / TCP / TLS / send / wait / recv stats with a colored bar.
+- **Latency mini-benchmark** — `--repeat N` sends a request N times and reports min/p50/p90/p99/max per phase, over pooled or `--fresh` connections.
 - **Security headers audit** — `weeb audit URL` grades HSTS, CSP, cookies, CORS and more, pass/warn/fail with a reason each; `--check` turns it into a monitoring plugin.
 - **Two outputs, kept apart** — a human-facing error *voice* (configurable, optionally anime) and structured *logs* to a file.
 - **🌈 mode** — because sometimes you want rainbow vomit. `ctrl+y`.
@@ -495,6 +496,57 @@ is one. If you want these numbers in Prometheus anyway, `weeb cert --json`
 plus the node_exporter textfile collector is a one-line cron job, or wire
 `--check` output through
 [script_exporter](https://github.com/ricoberger/script_exporter).
+
+## Latency benchmark (`--repeat`)
+
+`--repeat N` sends the same request N times and prints a summary instead of
+the body (bodies are discarded). It reuses the per-request timing trace, so
+every phase gets its own distribution:
+
+```sh
+weeb https://api.example.com/health --repeat 200 --concurrency 8
+# GET https://api.example.com/health
+# 200 requests · concurrency 8 · keep-alive
+# 2.41s elapsed · 83.0 req/s · 8 new connections, 192 reused · 0 errors
+#
+#               n       min       p50       p90       p99       max
+# dns           8    1.20ms    1.41ms    2.05ms    2.05ms    2.05ms
+# connect       8    9.84ms    10.3ms    11.9ms    11.9ms    11.9ms
+# tls           8    21.6ms    23.0ms    25.8ms    25.8ms    25.8ms
+# wait        200    61.2ms    84.7ms   121.0ms   188.0ms   203.0ms
+# total       200    62.0ms    86.1ms   158.0ms   224.0ms   241.0ms
+#
+# 200       ██████████████████████████████ 200 (100%)
+```
+
+`wait` is the server's time to first byte (request sent → first response
+byte); `total` is the whole request. `dns`, `connect` and `tls` count only the
+requests that opened a connection, which is why their `n` can be smaller.
+
+**Keep-alive or fresh?** By default connections are pooled like a real
+client's (the pool is sized to `--concurrency`), so after the first few
+requests you measure steady-state latency: what a busy client or service
+mesh sees. `--fresh` turns keep-alive off, so every request pays for a DNS
+lookup, a TCP connect and a full TLS handshake: what a first-time visitor or
+a client without pooling sees. Run both to see how much of your latency is
+connection setup.
+
+ctrl+c stops early and still prints the summary of the requests that
+finished (in-flight ones are abandoned, not counted as errors); a second
+ctrl+c quits immediately. `--json` emits the summary as one object, e.g.
+`.phases.total.p99_ms`, `.status["200"]`, `.errors`, `.error_causes`. The
+exit code is 1 if any request failed or got a status ≥ 400, like a single
+request. Repeated requests aren't recorded in `weeb history`.
+
+| Flag | Description |
+|------|-------------|
+| `--repeat N` | Send the request N times and print a latency summary (implies headless) |
+| `--concurrency C` | Requests in flight at once (default 1) |
+| `--fresh` | Disable keep-alive: every request does DNS, TCP and TLS |
+| `--json` | Emit the summary as JSON |
+
+`--timeout` applies to each request; `--repeat` can't be combined with
+`--check`, `-o`, `-i` or `--to-curl`.
 
 ## Security headers audit
 

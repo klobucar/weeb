@@ -116,9 +116,10 @@ func printVersion(w io.Writer) {
 // pipe/script — stdout isn't a terminal, a body is piped into stdin, or the
 // body goes to a file (-o) — or when a flag asks for it (--no-tui, --raw,
 // --to-curl, --no-follow, -i, --check: the TUI form has no redirect toggle, so opening it
-// would silently drop the flag).
+// would silently drop the flag; --repeat prints a summary, not a form).
 func (a cliArgs) headless() bool {
-	return a.noTUI || a.quiet || a.raw || a.toCurl || a.noFollow || a.include || a.check || a.output != "" || !stdoutIsTTY() || stdinIsPiped()
+	return a.noTUI || a.quiet || a.raw || a.toCurl || a.noFollow || a.include || a.check || a.output != "" || !stdoutIsTTY() || stdinIsPiped() ||
+		a.repeat > 0
 }
 
 // ---- TUI mode --------------------------------------------------------------
@@ -195,6 +196,12 @@ type cliArgs struct {
 	expectHeader []string      // --expect-header (repeatable): 'Name', 'Name: RE', '!Name'
 	expectJSON   []string      // --expect-json (repeatable): jq-like path + comparison
 	warn, crit   time.Duration // -w/-c: response-time thresholds
+
+	// Latency benchmark (see repeat.go). repeat replaces the body output with
+	// a timing summary; --json (checkJSON above) renders that as JSON too.
+	repeat      int  // --repeat N: send the request N times
+	concurrency int  // --concurrency C: requests in flight at once (0 = 1)
+	fresh       bool // --fresh: no keep-alive, every request dials anew
 }
 
 // prettyOn resolves the body view: pretty is on by default (and at a TTY), with
@@ -220,6 +227,10 @@ func (a cliArgs) prettyOn() bool {
 // receives the exact raw bytes the server sent (`weeb ... | jq` stays clean).
 func runCLI(a cliArgs) int {
 	spec := RequestSpec{Method: a.method, URL: a.url, Headers: a.headers, Body: a.body, NoFollow: a.noFollow}
+
+	if a.repeat > 0 {
+		return runRepeat(a, spec)
+	}
 
 	// --to-curl: export the request (with env prefills resolved, so it's a
 	// faithful reproduction of what weeb would send) instead of sending it.
@@ -804,6 +815,24 @@ func parseCLI(args []string) (cliArgs, error) {
 				a.crit = d
 			}
 
+		case arg == "--repeat" || arg == "--concurrency":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			n, err := strconv.Atoi(val)
+			if err != nil || n < 1 {
+				return a, fmt.Errorf("bad %s %q (want a whole number, 1 or more)", arg, val)
+			}
+			if arg == "--repeat" {
+				a.repeat = n
+			} else {
+				a.concurrency = n
+			}
+
+		case arg == "--fresh":
+			a.fresh = true
+
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			return a, fmt.Errorf("unknown flag %q", arg)
 
@@ -845,6 +874,10 @@ func parseCLI(args []string) (cliArgs, error) {
 	// flipping GET to POST is worse than dropping the unrequested body.
 	if !methodSet && bodySet && len(a.body) > 0 {
 		a.method = "POST"
+	}
+
+	if err := a.checkRepeatFlags(); err != nil {
+		return a, err
 	}
 
 	return a, nil
@@ -985,6 +1018,19 @@ STREAMING (text/event-stream, application/x-ndjson, jsonl, json-seq)
   data. In the TUI, esc stops a stream and keeps what arrived; the pane keeps
   the newest 2000 events (at most 4 MB).
 
+BENCHMARK (--repeat; a latency mini-benchmark)
+      --repeat N        send the request N times and print a summary on stdout
+                        instead of the body (bodies are discarded): min/p50/
+                        p90/p99/max for dns, connect, tls, wait (TTFB) and
+                        total, a status-code histogram, and the error count.
+                        ctrl+c stops early and still prints it. Exit 1 if any
+                        request failed or got a status >= 400 (implies headless)
+      --concurrency C   requests in flight at once (default 1)
+      --fresh           no keep-alive: every request pays for DNS, TCP and TLS
+                        (what a first-time visitor sees). The default reuses
+                        connections like a real client (steady-state latency)
+      --json            with --repeat: the summary as one JSON object
+
 CURL IMPORT (weeb curl '<command>')
   Paste a curl command (from docs, DevTools "Copy as cURL", etc.) and weeb runs
   it: -X/-H/-d/--data*, -u (basic auth), -A/-b/-e, @file bodies. Transfer-only
@@ -1082,6 +1128,8 @@ EXAMPLES
   weeb cert ./chain.pem --host example.com
   cat chain.pem | weeb cert - --check -w 30 -c 14
   weeb https://api.example.com/health --check --expect-body '"status": *"ok"' -w 500ms -c 2s
+  weeb https://api.example.com/health --repeat 200 --concurrency 8
+  weeb https://api.example.com/health --repeat 50 --fresh --json | jq .phases.tls
   weeb audit example.com
   weeb audit https://example.com/login --check
   weeb https://api.example.com/health --check --expect-json '.status == "ok"' --expect-header '!X-Debug'

@@ -192,6 +192,11 @@ type Client struct {
 	// on an event stream, where it becomes an idle timeout. Only the DEFAULT
 	// timeout steps aside for a BodySink or an event stream.
 	explicitTimeout bool
+
+	// noHistory skips history recording. --repeat sets it: N copies of one
+	// request would push real entries out of the capped file, and
+	// concurrent appends would race its rewrite.
+	noHistory bool
 }
 
 func newClient(logger *log.Logger, voice ErrorChan) *Client {
