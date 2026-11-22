@@ -140,3 +140,19 @@ func TestFishOptAndQuote(t *testing.T) {
 		t.Errorf("fishQuote = %s, want %s", got, want)
 	}
 }
+
+// weeb view (#41) landed alongside fish completion: its flags, --type values
+// and file names must reach the fish script too.
+func TestFishCompletionView(t *testing.T) {
+	s := fishCompletion()
+	for _, want := range []string{
+		"complete -c weeb -n '__fish_seen_subcommand_from view' -l type -x -a 'json xml html yaml md'",
+		"complete -c weeb -n '__fish_seen_subcommand_from view' -l raw",
+		"complete -c weeb -n '__fish_seen_subcommand_from view' -F",
+		"complete -c weeb -n '__fish_seen_subcommand_from cert tls' -l file -r -F",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("fish script missing %q", want)
+		}
+	}
+}
