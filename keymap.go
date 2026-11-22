@@ -18,6 +18,7 @@ type keyMap struct {
 	TogglePretty  key.Binding
 	ToggleDebug   key.Binding
 	ToggleRainbow key.Binding
+	Stop          key.Binding // only while a request runs; otherwise esc reaches the fields as before
 	Quit          key.Binding
 
 	// Response-pane folding (active only when the response pane is focused, so
@@ -43,6 +44,7 @@ func defaultKeyMap() keyMap {
 		TogglePretty:  key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "pretty/sniff body")),
 		ToggleDebug:   key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "debug log")),
 		ToggleRainbow: key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("ctrl+y", "rainbow")),
+		Stop:          key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "stop request/stream")),
 		Quit:          key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 
 		SectionPrev: key.NewBinding(key.WithKeys("left", "shift+up"), key.WithHelp("←", "prev section")),

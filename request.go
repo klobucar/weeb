@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -115,6 +116,14 @@ type RequestSpec struct {
 	// (status, Location header, body) instead of whatever it points at.
 	NoFollow bool
 
+	// OnStream, when non-nil, takes event streams live: if the response is
+	// text/event-stream or JSON lines (see streamFormatOf), Do hands it the
+	// response metadata as soon as the headers arrive, then each event as it
+	// completes, instead of buffering the body until the server closes it.
+	// Any other response is handled as if OnStream were nil. BodySink wins
+	// when both are set.
+	OnStream StreamSink
+
 	// envHeaderKeys holds the lowercased names of the headers that came from
 	// the environment (WEEB_HEADERS, WEEB_TOKEN) — injected by resolveSpec,
 	// or, for the TUI form, rows still holding their env prefill — so
@@ -148,6 +157,13 @@ type Result struct {
 	// URL first, then every hop taken, ending at the final URL (which is also
 	// what URL above holds). Empty when the request wasn't redirected.
 	Redirects []string
+
+	// Stream is set when the body was an event stream delivered live through
+	// RequestSpec.OnStream (Body stays empty); Events counts its events.
+	// Stopped records that the caller ended the request (DoContext's ctx).
+	Stream  streamFormat
+	Events  int
+	Stopped bool
 }
 
 // OK reports whether the request fully succeeded (sent, received, status < 400).
@@ -166,36 +182,37 @@ func (r Result) bodySize() int64 {
 // Client is the single component that executes requests and handles their
 // results. Construct it once per process with the chosen logger and ErrorChan.
 type Client struct {
-	http   *http.Client
-	stream *http.Client // BodySink requests: bounds time-to-headers, not the body copy
+	http   *http.Client // its Timeout is the timeout in force: the default or --timeout
+	stream *http.Client // the live path (BodySink / OnStream): no Timeout, liveTimer instead
 	log    *log.Logger
 	voice  ErrorChan
 
 	// explicitTimeout records that the user passed --timeout. An explicit
-	// value is a total cap, so Do keeps it on streamed transfers too; only
-	// the DEFAULT timeout steps aside for a BodySink.
+	// value is a total cap, so Do keeps it on streamed transfers too — except
+	// on an event stream, where it becomes an idle timeout. Only the DEFAULT
+	// timeout steps aside for a BodySink or an event stream.
 	explicitTimeout bool
 }
 
 func newClient(logger *log.Logger, voice ErrorChan) *Client {
 	// http.Client.Timeout covers reading the entire body, which would kill a
 	// streamed download (-o / piped) at 30s mid-transfer — and streaming
-	// exists precisely for arbitrarily large bodies. The stream client moves
-	// the default timeout to the response headers instead (the cloned default
-	// transport already carries a 30s dial timeout) and leaves the body copy
-	// unbounded, like curl -o.
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.ResponseHeaderTimeout = defaultTimeout
+	// exists precisely for arbitrarily large bodies — or a live event stream
+	// that runs for minutes. The stream client has no Timeout: Do's liveTimer
+	// bounds those requests instead and, once the headers say what the body
+	// is, decides whether the body is capped at all. The default transport
+	// still carries its 30s dial timeout.
 	return &Client{
 		http:   &http.Client{Timeout: defaultTimeout, CheckRedirect: redirectPolicy},
-		stream: &http.Client{Transport: tr, CheckRedirect: redirectPolicy},
+		stream: &http.Client{CheckRedirect: redirectPolicy},
 		log:    logger,
 		voice:  voice,
 	}
 }
 
 // SetTimeout applies a user-supplied --timeout. Explicit means "cap the whole
-// request", so unlike the default it also bounds streamed (BodySink) transfers.
+// request", so unlike the default it also bounds streamed (BodySink)
+// transfers; on an event stream it caps the silence between bytes instead.
 func (c *Client) SetTimeout(d time.Duration) {
 	c.http.Timeout = d
 	c.explicitTimeout = true
@@ -301,6 +318,14 @@ func effectivePort(u *url.URL) string {
 // display string. No other code logs request-lifecycle events or formats a
 // failure for display.
 func (c *Client) Do(spec RequestSpec) Result {
+	return c.DoContext(context.Background(), spec)
+}
+
+// DoContext is Do under the caller's ctx: canceling it stops the request
+// (the TUI's stop key). A live event stream stopped that way ends cleanly —
+// the events that arrived stand, Result.Stopped is set and Err stays nil —
+// while any other request stopped early fails as stopped.
+func (c *Client) DoContext(ctx context.Context, spec RequestSpec) Result {
 	spec = resolveSpec(spec)
 	res := Result{Method: strings.ToUpper(strings.TrimSpace(spec.Method)), URL: spec.URL}
 
@@ -319,10 +344,16 @@ func (c *Client) Do(spec RequestSpec) Result {
 
 	// Redirect signals travel on the request context — see redirectPolicy.
 	var hops []string
-	ctx := context.WithValue(req.Context(), redirectChainKey{}, &hops)
+	rctx := context.WithValue(req.Context(), redirectChainKey{}, &hops)
 	if spec.NoFollow {
-		ctx = context.WithValue(ctx, noFollowKey{}, true)
+		rctx = context.WithValue(rctx, noFollowKey{}, true)
 	}
+	// Each way weeb ends a request early — the caller's stop, a liveTimer
+	// timeout — cancels with a cause naming why, which explainCancel puts in
+	// the error in place of a bare "context canceled".
+	rctx, cancel := context.WithCancelCause(rctx)
+	defer cancel(nil)
+	defer context.AfterFunc(ctx, func() { cancel(errStopped) })()
 	// History is recorded after the fact: deferred here — past the build
 	// errors, so only requests that were actually attempted leave an entry —
 	// and the closure sees the final res (status, duration) on every return
@@ -330,19 +361,25 @@ func (c *Client) Do(spec RequestSpec) Result {
 	defer func() { c.recordHistory(spec, res) }()
 
 	tr := &reqTrace{}
-	req = req.WithContext(httptrace.WithClientTrace(ctx, tr.clientTrace()))
+	req = req.WithContext(httptrace.WithClientTrace(rctx, tr.clientTrace()))
 
-	// Streaming with the default timeout: bound the wait for headers, never
-	// the body copy. An explicit --timeout keeps the total cap even here.
+	// A body that goes somewhere as it arrives (a BodySink, or a live stream
+	// for OnStream) can't run under http.Client.Timeout, which would cap the
+	// body too; liveTimer applies the timeout there instead.
 	httpc := c.http
-	if spec.BodySink != nil && !c.explicitTimeout {
+	var lt *liveTimer
+	if spec.BodySink != nil || spec.OnStream != nil {
 		httpc = c.stream
+		lt = startLiveTimer(c.http.Timeout, cancel)
+		defer lt.stop()
 	}
 
 	start := time.Now()
 	tr.start = start
 	resp, err := httpc.Do(req)
 	if err != nil {
+		err = explainCancel(rctx, err)
+		res.Stopped = errors.Is(err, errStopped)
 		dur := time.Since(start)
 		res.Timing.Total = dur // no trace events fired; record the wall time at least
 		rlog.Error("request failed",
@@ -353,15 +390,59 @@ func (c *Client) Do(spec RequestSpec) Result {
 	}
 	defer resp.Body.Close()
 
+	// Redirects followed: prefix the original URL so the chain reads
+	// start → … → final, and point URL at where the request ended up.
+	if len(hops) > 0 {
+		res.Redirects = append([]string{res.URL}, hops...)
+		res.URL = resp.Request.URL.String()
+	}
+
+	// The metadata is all known before the body, so a live stream can show
+	// it straight away.
+	res.TLS = tlsSummary(resp.TLS)
+	res.Status = resp.StatusCode
+	res.StatusText = http.StatusText(resp.StatusCode)
+	res.Proto = resp.Proto
+	res.Headers = resp.Header
+	res.ContentType = resp.Header.Get("Content-Type")
+	stream := streamFormatOf(res.ContentType)
+
+	// With the body's kind known, settle the live path's timeout. An event
+	// stream runs as long as the server keeps it open, so the default timeout
+	// never caps one and an explicit --timeout caps only silence; the default
+	// never caps a piped download either (#28). Anything else keeps the total
+	// cap, as on the buffered path.
+	var src io.Reader = resp.Body
+	if lt != nil {
+		lt.headers()
+		switch {
+		case stream != streamNone && c.explicitTimeout:
+			src = lt.idle(resp.Body)
+		case stream != streamNone, spec.BodySink != nil && !c.explicitTimeout:
+			lt.stop()
+		}
+	}
+
 	var body []byte
 	var bodySize int64
 	var readErr error
-	if spec.BodySink != nil {
+	switch {
+	case spec.BodySink != nil:
 		// Streaming: bytes go to the sink as they arrive, uncapped — the
 		// caller owns the destination, memory stays constant.
-		bodySize, readErr = io.Copy(spec.BodySink, resp.Body)
-	} else {
-		body, readErr = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+		bodySize, readErr = io.Copy(spec.BodySink, src)
+	case stream != streamNone && spec.OnStream != nil:
+		// A live event stream: parsed as it arrives and handed over event by
+		// event, so memory holds one event at a time (see eventCap).
+		res.Stream = stream
+		res.Timing = tr.timing(time.Now())
+		spec.OnStream.StreamStart(res)
+		p := newEventParser(stream, spec.OnStream.StreamEvent)
+		bodySize, readErr = io.Copy(p, src)
+		_ = p.Close()
+		res.Events = p.seq
+	default:
+		body, readErr = io.ReadAll(io.LimitReader(src, maxBodyBytes+1))
 		if readErr == nil && int64(len(body)) > maxBodyBytes {
 			body = body[:maxBodyBytes]
 			capStr := humanSize(int(maxBodyBytes))
@@ -372,23 +453,19 @@ func (c *Client) Do(spec RequestSpec) Result {
 	done := time.Now()
 	dur := done.Sub(start)
 
-	// Redirects followed: prefix the original URL so the chain reads
-	// start → … → final, and point URL at where the request ended up.
-	if len(hops) > 0 {
-		res.Redirects = append([]string{res.URL}, hops...)
-		res.URL = resp.Request.URL.String()
-	}
-
 	res.Timing = tr.timing(done)
-	res.TLS = tlsSummary(resp.TLS)
-	res.Status = resp.StatusCode
-	res.StatusText = http.StatusText(resp.StatusCode)
-	res.Proto = resp.Proto
-	res.Headers = resp.Header
-	res.ContentType = resp.Header.Get("Content-Type")
 	res.Body = body
 	res.BodySize = bodySize
 
+	if readErr != nil {
+		readErr = explainCancel(rctx, readErr)
+		if errors.Is(readErr, errStopped) {
+			res.Stopped = true
+			if res.Stream != streamNone {
+				readErr = nil // stopping is how a live stream normally ends
+			}
+		}
+	}
 	if readErr != nil {
 		rlog.Error("request failed",
 			"kind", KindBadBody.String(), "status", resp.StatusCode,
