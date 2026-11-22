@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"net/http/httptrace"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,11 @@ type Timing struct {
 	Transfer time.Duration // first byte -> body fully read
 	Total    time.Duration // everything
 	Reused   bool          // connection came from the keep-alive pool
+
+	// Which connection-setup phases ran for this request. A phase can measure
+	// 0 on a coarse clock (Windows, loopback) and still have happened, so
+	// counting phases by duration > 0 undercounts.
+	DidDNS, DidConnect, DidTLS bool
 }
 
 // connTLS summarizes the negotiated TLS parameters of a request's connection.
@@ -28,8 +34,13 @@ type connTLS struct {
 	Leaf    *certInfo
 }
 
-// reqTrace records phase timestamps as a request progresses.
+// reqTrace records phase timestamps as a request progresses. Its callbacks
+// can run on transport goroutines concurrently with timing(): the transport
+// may start a dial for a request, hand it a pooled connection instead, and
+// finish the abandoned dial (firing ConnectDone/TLS callbacks on this trace)
+// after Do has read the timing. mu guards every field.
 type reqTrace struct {
+	mu                  sync.Mutex
 	start               time.Time
 	dnsStart, dnsDone   time.Time
 	connStart, connDone time.Time
@@ -40,38 +51,59 @@ type reqTrace struct {
 }
 
 func (t *reqTrace) clientTrace() *httptrace.ClientTrace {
+	at := func(f func(now time.Time)) {
+		now := time.Now()
+		t.mu.Lock()
+		f(now)
+		t.mu.Unlock()
+	}
 	return &httptrace.ClientTrace{
-		DNSStart: func(httptrace.DNSStartInfo) { t.dnsStart = time.Now() },
-		DNSDone:  func(httptrace.DNSDoneInfo) { t.dnsDone = time.Now() },
+		DNSStart: func(httptrace.DNSStartInfo) { at(func(n time.Time) { t.dnsStart = n }) },
+		DNSDone:  func(httptrace.DNSDoneInfo) { at(func(n time.Time) { t.dnsDone = n }) },
 		ConnectStart: func(_, _ string) {
-			if t.connStart.IsZero() {
-				t.connStart = time.Now()
-			}
+			at(func(n time.Time) {
+				if t.connStart.IsZero() {
+					t.connStart = n
+				}
+			})
 		},
-		ConnectDone:          func(_, _ string, _ error) { t.connDone = time.Now() },
-		TLSHandshakeStart:    func() { t.tlsStart = time.Now() },
-		TLSHandshakeDone:     func(tls.ConnectionState, error) { t.tlsDone = time.Now() },
-		GotConn:              func(gi httptrace.GotConnInfo) { t.gotConn = time.Now(); t.reused = gi.Reused },
-		WroteRequest:         func(httptrace.WroteRequestInfo) { t.wroteReq = time.Now() },
-		GotFirstResponseByte: func() { t.firstByte = time.Now() },
+		ConnectDone:       func(_, _ string, _ error) { at(func(n time.Time) { t.connDone = n }) },
+		TLSHandshakeStart: func() { at(func(n time.Time) { t.tlsStart = n }) },
+		TLSHandshakeDone:  func(tls.ConnectionState, error) { at(func(n time.Time) { t.tlsDone = n }) },
+		GotConn: func(gi httptrace.GotConnInfo) {
+			at(func(n time.Time) { t.gotConn, t.reused = n, gi.Reused })
+		},
+		WroteRequest:         func(httptrace.WroteRequestInfo) { at(func(n time.Time) { t.wroteReq = n }) },
+		GotFirstResponseByte: func() { at(func(n time.Time) { t.firstByte = n }) },
 	}
 }
 
 // timing computes the phase breakdown given when the body finished reading.
 func (t *reqTrace) timing(done time.Time) Timing {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	tm := Timing{Reused: t.reused, Total: done.Sub(t.start)}
-	if !t.dnsStart.IsZero() && !t.dnsDone.IsZero() {
-		tm.DNS = t.dnsDone.Sub(t.dnsStart)
-	}
-	if !t.connStart.IsZero() && !t.connDone.IsZero() {
-		tm.TCP = t.connDone.Sub(t.connStart)
-	}
-	if !t.tlsStart.IsZero() && !t.tlsDone.IsZero() {
-		tm.TLS = t.tlsDone.Sub(t.tlsStart)
+	// A pooled connection paid no setup. Dial/TLS events on its trace belong
+	// to an abandoned background dial, so they are ignored rather than
+	// reported as this request's setup time.
+	if !t.reused {
+		if tm.DidDNS = !t.dnsStart.IsZero() && !t.dnsDone.IsZero(); tm.DidDNS {
+			tm.DNS = t.dnsDone.Sub(t.dnsStart)
+		}
+		if tm.DidConnect = !t.connStart.IsZero() && !t.connDone.IsZero(); tm.DidConnect {
+			tm.TCP = t.connDone.Sub(t.connStart)
+		}
+		if tm.DidTLS = !t.tlsStart.IsZero() && !t.tlsDone.IsZero(); tm.DidTLS {
+			tm.TLS = t.tlsDone.Sub(t.tlsStart)
+		}
 	}
 	// Whenever the connection became usable (post-handshake / from the pool).
 	afterConn := t.gotConn
-	for _, ts := range []time.Time{t.connDone, t.tlsDone} {
+	setupDone := []time.Time{t.connDone, t.tlsDone}
+	if t.reused {
+		setupDone = nil
+	}
+	for _, ts := range setupDone {
 		if ts.After(afterConn) {
 			afterConn = ts
 		}
