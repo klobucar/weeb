@@ -161,6 +161,25 @@ weeb POST https://api.example.com/users -H "Accept: application/json" -d '{"a":1
 
 In the TUI, `ctrl+x` shows the curl equivalent of the current form.
 
+## History
+
+Every request weeb sends is recorded to `history.jsonl` in the private weeb
+cache dir (newest 500 kept). List it, re-run an entry, or wipe it:
+
+```sh
+weeb history          # the last 20, newest first
+weeb history 3        # re-run entry 3
+weeb history --clear  # delete it all
+```
+
+Credentials are never written to disk. Credential headers (`Authorization`,
+`Cookie`, anything named like a token/secret/key) are stored as `REDACTED`
+and re-injected from `WEEB_TOKEN`/`WEEB_HEADERS` on replay. Secret-looking
+URL query values, a `user:pass@` password, and secret fields in JSON or form
+bodies are redacted too; since those can't be restored, such an entry is
+listed but won't replay. Bodies over 4 KiB keep only their size. Set
+`WEEB_HISTORY=0` to turn history off.
+
 ## TLS / certificate inspection
 
 `weeb cert` is meant to fully replace `openssl s_client -connect` for the things
@@ -279,6 +298,7 @@ Prefills are applied to every request unless you override them:
 | `WEEB_RAINBOW` | `1`/`true` launches the TUI in 🌈 mode |
 | `WEEB_PRETTY` | Pretty body view; on by default, set `0`/`false` for raw |
 | `WEEB_MAX_BODY` | Cap for buffered bodies, e.g. `256m` (default `64m`, `0` = no cap; `--max-body` wins) |
+| `WEEB_HISTORY` | `0`/`false` turns off request history (recording and `weeb history`) |
 
 Logging is structured diagnostics, kept off stdout entirely:
 
