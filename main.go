@@ -187,6 +187,8 @@ type cliArgs struct {
 	checkJSON    bool          // --json: render the verdict as a JSON object
 	expectStatus string        // --expect-status: statuses that count as OK
 	expectBody   string        // --expect-body: Go regexp the body must match
+	expectHeader []string      // --expect-header (repeatable): 'Name', 'Name: RE', '!Name'
+	expectJSON   []string      // --expect-json (repeatable): jq-like path + comparison
 	warn, crit   time.Duration // -w/-c: response-time thresholds
 }
 
@@ -230,6 +232,11 @@ func runCLI(a cliArgs) int {
 
 	if err := applyMaxBody(a.maxBody); err != nil {
 		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 2
+	}
+
+	if !a.check && (len(a.expectHeader) > 0 || len(a.expectJSON) > 0) {
+		fmt.Fprintln(os.Stderr, "weeb: --expect-header/--expect-json only apply with --check")
 		return 2
 	}
 
@@ -732,6 +739,20 @@ func parseCLI(args []string) (cliArgs, error) {
 			}
 			a.expectBody = val
 
+		case arg == "--expect-header":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.expectHeader = append(a.expectHeader, val)
+
+		case arg == "--expect-json":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			a.expectJSON = append(a.expectJSON, val)
+
 		case arg == "-w" || arg == "--warn", arg == "-c" || arg == "--crit":
 			val, err := nextArg(args, &i, arg)
 			if err != nil {
@@ -892,11 +913,27 @@ MONITORING (--check; a check_http replacement)
       --expect-status S statuses that count as OK: codes, ranges, or classes,
                         e.g. "200", "200-204,301", "2xx" (default: any < 400)
       --expect-body RE  CRITICAL unless the body matches this Go regexp
+      --expect-header H CRITICAL unless the response header is: 'Name' present,
+                        'Name: RE' present with a value matching the Go regexp,
+                        or '!Name' absent (repeatable)
+      --expect-json EXPR
+                        CRITICAL unless the JSON body satisfies EXPR, a jq-like
+                        path with an optional comparison (repeatable):
+                          '.status == "ok"'   '.items[0].id != null'
+                          '.count > 0'        '.version =~ "^2\."'
+                          '.data.items | length >= 1'
+                          '.a.b'  bare: must exist and be neither null nor false
+                        paths: .key  .["any key"]  [N]  [-1] (from the end);
+                        values are JSON literals; ops: == != < <= > >= =~ (a
+                        quoted Go regexp); '| length' is the one function. A
+                        non-JSON body is CRITICAL; a bad EXPR is UNKNOWN
   -w, --warn DUR        WARNING when the request takes longer, e.g. 500ms
   -c, --crit DUR        CRITICAL when the request takes longer, e.g. 2s
       --json            render the verdict as one JSON object instead of the
                         plugin line — {check, status, code, message, metrics}
                         — same exit code (for script_exporter & friends)
+                        HTTP verdicts also list "assertions": each one's type,
+                        expect, ok, and actual value (clipped)
 
 CURL IMPORT (weeb curl '<command>')
   Paste a curl command (from docs, DevTools "Copy as cURL", etc.) and weeb runs
@@ -948,6 +985,7 @@ EXAMPLES
   weeb cert example.com --pem > chain.pem
   weeb cert example.com --check -w 30 -c 14
   weeb https://api.example.com/health --check --expect-body '"status": *"ok"' -w 500ms -c 2s
+  weeb https://api.example.com/health --check --expect-json '.status == "ok"' --expect-header '!X-Debug'
 
 TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
