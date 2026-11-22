@@ -44,6 +44,7 @@ own site, leaf → ISRG Root:
 
 - **curl-shaped CLI** — `-H`, `-d @file`/`-`/stdin, `-X`, interleaved flags and positionals, just like you already type.
 - **curl import & export** — paste a `curl` command to run it (`weeb curl '…'`), or turn any request into one (`--to-curl`, or `ctrl+x` in the TUI).
+- **`.http` files** — run requests from VS Code REST Client / JetBrains HTTP Client files (`weeb run api.http login`).
 - **Pretty bodies** — JSON, XML, HTML & YAML get syntax color and **collapsible folding**; Markdown gets a full [Glamour](https://github.com/charmbracelet/glamour) render. `--raw` for the exact bytes.
 - **File viewer** — `weeb view data.json` (or `… | weeb view`) browses a local JSON/XML/HTML/YAML/Markdown file in the same foldable pane, like jless or fx; piped, it's a pretty-printer.
 - **TLS inspection** — a friendlier `openssl s_client`: full chain, expiry, SANs, ciphers, OCSP/SCT, plus `--starttls`, `--sni` override, `--alpn`, version pinning, client certs, and `--pem` dump.
@@ -213,6 +214,76 @@ weeb POST https://api.example.com/users -H "Accept: application/json" -d '{"a":1
 
 In the TUI, `ctrl+x` shows the curl equivalent of the current form and copies
 it to your clipboard.
+
+## .http files
+
+`weeb run` reads `.http` files, the plain-text request format shared by the
+VS Code REST Client and the JetBrains HTTP Client, so a collection that lives
+in your repo runs from the terminal too:
+
+```http
+@base = https://api.example.com
+@token = {{$processEnv API_TOKEN}}
+
+### Log in
+# @name login
+POST {{base}}/login
+Content-Type: application/json
+
+< ./login.json
+
+### Who am I?
+# @name me
+GET {{base}}/me
+    ?fields=id,name
+    &verbose=true
+Authorization: Bearer {{token}}
+Accept: application/json
+```
+
+```sh
+weeb run api.http                # list: index, name or title, method, URL
+weeb run api.http me             # run one by @name…
+weeb run api.http 2              # …or by number
+weeb run api.http me --env dev   # with variables from http-client.env.json
+```
+
+At a terminal the request opens in the TUI, prefilled and ready to send;
+piped (or with `--no-tui`) it runs headless, body to stdout. `WEEB_HEADERS`
+and `WEEB_TOKEN` apply as they do to any request.
+
+What's understood:
+
+- `###` separates requests; text after it is a title. `# @name NAME` (or
+  `// @name NAME`) names one, and `# @no-redirect` shows a 3xx instead of
+  following it.
+- `[METHOD] URL [HTTP/version]`, where the method defaults to `GET`, followed
+  by optional `?…`/`&…` query lines, then headers up to a blank line, then
+  the body up to the next `###`. Other `#` and `//` lines are comments before
+  the request line and among headers; in a body they're sent as written.
+- `< ./file` includes a file as the body (or part of it) byte for byte;
+  `<@ ./file` substitutes variables in it first. Paths are relative to the
+  `.http` file. Multipart bodies are sent with CRLF line endings.
+- `@name = value` defines a file variable, used as `{{name}}` in the URL,
+  headers and body; values can use other variables.
+- `{{$processEnv VAR}}` (VS Code) and `{{$env.VAR}}` (JetBrains) read
+  environment variables. `{{$guid}}`/`{{$uuid}}`, `{{$timestamp}}` and
+  `{{$isoTimestamp}}` are generated.
+- `--env NAME` takes variables from environment `NAME` in
+  `http-client.env.json` next to the file, merged with
+  `http-client.private.env.json` and the `$shared` environment. File
+  variables win over environment-file ones.
+
+An undefined variable is an error naming the variable and its line. Values
+read from environment variables (and the private env file) never appear in
+the listing, which shows `{{$processEnv TOKEN}}` as written, or in weeb's
+errors and logs, which show the reference in place of the value.
+
+Not supported: response chaining (`{{login.response.body.$.token}}` is an
+error, so run the requests separately), JetBrains pre-request and response
+handler scripts (skipped; a variable a script would set is reported as
+undefined), `@prompt`, and other dynamic variables such as `$randomInt` or
+`$datetime`.
 
 ## History
 
