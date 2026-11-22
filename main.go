@@ -63,6 +63,8 @@ func main() {
 		os.Exit(runCompletion(args[1:], os.Stdout))
 	case "history":
 		os.Exit(runHistory(args[1:]))
+	case "view":
+		os.Exit(runView(args[1:]))
 	}
 
 	parsed, err := parseCLI(args)
@@ -838,6 +840,7 @@ USAGE
   weeb curl '<curl cmd>'     run a pasted curl command (import)
   weeb completion zsh|bash   print shell completion script
   weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
+  weeb view [FILE|-] [opts]  browse a JSON/XML/HTML/YAML/Markdown file, foldable
   weeb version               print the build version
 
   METHOD defaults to GET. A URL opens the interactive builder, BUT weeb runs a
@@ -932,6 +935,18 @@ CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   exit code is non-zero when the chain is untrusted (unless -k) or expired,
   so 'weeb cert' doubles as a cron/monitoring check.
 
+VIEW (weeb view [FILE|-])  — a local jless/fx, using the response pane
+  Reads FILE, or stdin when FILE is - or omitted. At a terminal it opens the
+  pretty, foldable viewer: the response-pane keys plus ctrl+p pretty/raw,
+  ctrl+y 🌈, q or ctrl+c to quit. Piped, it prints the uncolored pretty render
+  (JSON and XML reindented; HTML, YAML and Markdown as-is), so it doubles as a
+  formatter. The format comes from the file extension, else a content sniff.
+      --type T          force the format: json | xml | html | yaml | md
+      --raw             piped: write the bytes unchanged; at a terminal: open
+                        in the raw view (ctrl+p toggles)
+      --max-body SIZE   refuse input larger than SIZE (default 64m, 0 = no cap;
+                        overrides WEEB_MAX_BODY)
+
 COMPLETION (weeb completion zsh|bash)
   prints a static tab-completion script — zsh: save it as _weeb in your $fpath;
   bash: add 'eval "$(weeb completion bash)"' to ~/.bashrc.
@@ -948,6 +963,9 @@ EXAMPLES
   weeb cert example.com --pem > chain.pem
   weeb cert example.com --check -w 30 -c 14
   weeb https://api.example.com/health --check --expect-body '"status": *"ok"' -w 500ms -c 2s
+  weeb view data.json
+  kubectl get pod web -o yaml | weeb view --type yaml
+  weeb view data.json > pretty.json
 
 TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
