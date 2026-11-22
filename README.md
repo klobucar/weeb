@@ -5,6 +5,7 @@
 </p>
 
 [![CI](https://github.com/klobucar/weeb/actions/workflows/ci.yml/badge.svg)](https://github.com/klobucar/weeb/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/klobucar/weeb)](https://github.com/klobucar/weeb/releases/latest)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 weeb is a terminal HTTP client. Build requests and browse responses in an interactive interface, or pipe the response body into tools like `jq`. You can paste a curl command, inspect a TLS certificate chain, or check an endpoint from a monitoring job.
