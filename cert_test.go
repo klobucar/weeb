@@ -838,6 +838,8 @@ func TestRunCertFile(t *testing.T) {
 		}
 	}
 	missing := filepath.Join(dir, "missing.pem")
+	// JSON escapes the path (Windows separators are backslashes).
+	bundleJSON, _ := json.Marshal(bundle)
 
 	cases := []struct {
 		name     string
@@ -850,7 +852,7 @@ func TestRunCertFile(t *testing.T) {
 		{"report, -k", []string{bundle, "-k"}, 0, []string{"not checked (insecure)"}, ""},
 		{"brief", []string{bundle, "-k", "--brief"}, 0, []string{"📜 Leaf"}, ""},
 		{"der via -f", []string{"-f", der, "-k"}, 0, []string{"DER, 1 certificate"}, ""},
-		{"json", []string{bundle, "-k", "--json"}, 0, []string{`"file": "` + bundle, `"format": "PEM"`, `"skipped_pem_blocks"`}, ""},
+		{"json", []string{bundle, "-k", "--json"}, 0, []string{`"file": ` + string(bundleJSON), `"format": "PEM"`, `"skipped_pem_blocks"`}, ""},
 		{"pem drops the key", []string{bundle, "-k", "--pem"}, 0, []string{"BEGIN CERTIFICATE"}, "skipped 1 PRIVATE KEY block"},
 		{"check warns on expiry", []string{bundle, "-k", "--check"}, checkWarning, []string{"CERT WARNING - " + bundle + " expires in 20 days", "|days=20;30;14"}, ""},
 		{"check json", []string{bundle, "-k", "--check", "--json", "-w", "10", "-c", "5"}, checkOK, []string{`"status":"OK"`}, ""},
