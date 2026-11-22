@@ -149,6 +149,46 @@ func TestRedirectKeepsCredentialsSameOrigin(t *testing.T) {
 	}
 }
 
+// net/http sets Referer to the previous URL, query string included, so a
+// credential in it (?api_key=) would reach the next origin. Like curl -L, no
+// Referer is sent unless the user set one, which is theirs to keep.
+func TestRedirectDropsAutoReferer(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "")
+	t.Setenv("WEEB_TOKEN", "")
+
+	var gotRef string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRef = r.Header.Get("Referer")
+	}))
+	defer target.Close()
+	// A second loopback server has a different port: a different origin.
+	hopper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/download", http.StatusFound)
+	}))
+	defer hopper.Close()
+
+	res := testClient().Do(RequestSpec{Method: "GET", URL: hopper.URL + "/export?api_key=SECRET123"})
+	if !res.OK() {
+		t.Fatalf("request failed: %v", res.Err)
+	}
+	if gotRef != "" {
+		t.Errorf("redirect sent an auto-added Referer with the original URL: %q", gotRef)
+	}
+
+	res = testClient().Do(RequestSpec{
+		Method:  "GET",
+		URL:     hopper.URL,
+		Headers: []Header{{Key: "Referer", Value: "https://me.example/"}},
+	})
+	if !res.OK() {
+		t.Fatalf("request failed: %v", res.Err)
+	}
+	if gotRef != "https://me.example/" {
+		t.Errorf("explicit Referer should survive the redirect, got %q", gotRef)
+	}
+}
+
 func TestNoFollowReturnsRedirectResponse(t *testing.T) {
 	t.Setenv("WEEB_BASE_URL", "")
 	t.Setenv("WEEB_HEADERS", "")
