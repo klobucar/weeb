@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -63,6 +62,8 @@ func main() {
 		os.Exit(runCompletion(args[1:], os.Stdout))
 	case "history":
 		os.Exit(runHistory(args[1:]))
+	case "view":
+		os.Exit(runView(args[1:]))
 	}
 
 	parsed, err := parseCLI(args)
@@ -404,6 +405,7 @@ func emitResult(res Result, wantStats, quiet, pretty, include bool) int {
 //	weeb cert example.com
 //	weeb cert https://example.com:8443 --json
 //	weeb cert expired.badssl.com -k     # inspect anyway, don't fail on bad trust
+//	weeb cert ./chain.pem               # a local PEM/DER file instead (certfile.go)
 //
 // Exit code is non-zero when the chain is untrusted (unless -k) or expired, so
 // it doubles as a monitoring check.
@@ -412,6 +414,7 @@ func runCert(args []string) int {
 	defer cleanup()
 
 	var target, persona, clientCertPath, clientKeyPath string
+	var certFile, fileHost string // -f/--file and --host: inspect a local cert file (certfile.go)
 	var insecure, asJSON, asPEM, brief, checkMode bool
 	warnDays, critDays := 30, 14 // --check expiry thresholds
 	opts := certOptions{timeout: defaultTimeout}
@@ -452,6 +455,20 @@ func runCert(args []string) int {
 				return 2
 			}
 			opts.sni = val
+		case arg == "-f" || arg == "--file":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			certFile = val
+		case arg == "--host":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "weeb:", err)
+				return 2
+			}
+			fileHost = val
 		case arg == "--starttls":
 			val, err := nextArg(args, &i, arg)
 			if err != nil {
@@ -523,8 +540,17 @@ func runCert(args []string) int {
 		}
 	}
 
-	if target == "" {
-		fmt.Fprintln(os.Stderr, "weeb: cert needs a host, e.g. 'weeb cert example.com'")
+	// A positional naming a local cert file (or "-" for stdin) is read, not
+	// dialed; isCertFileTarget keeps a bare hostname a hostname.
+	if certFile == "" && isCertFileTarget(target) {
+		certFile, target = target, ""
+	}
+	if target == "" && certFile == "" {
+		fmt.Fprintln(os.Stderr, "weeb: cert needs a host or a file, e.g. 'weeb cert example.com' or 'weeb cert chain.pem'")
+		return 2
+	}
+	if certFile != "" && target != "" {
+		fmt.Fprintf(os.Stderr, "weeb: unexpected argument %q (already reading %s)\n", target, certSourceName(certFile))
 		return 2
 	}
 	if checkMode && critDays > warnDays {
@@ -534,6 +560,15 @@ func runCert(args []string) int {
 		return printCheck(outW, newCheckVerdict("cert", checkUnknown, msg, "", nil), asJSON)
 	}
 	opts.insecure = insecure
+	if certFile != "" {
+		if flag := netOnlyCertFlag(opts, clientCertPath, clientKeyPath); flag != "" {
+			fmt.Fprintf(os.Stderr, "weeb: %s needs a live endpoint; %s is a certificate file\n", flag, certSourceName(certFile))
+			return 2
+		}
+	} else if fileHost != "" {
+		fmt.Fprintln(os.Stderr, "weeb: --host checks a certificate file; for a live endpoint use --sni")
+		return 2
+	}
 
 	if (clientCertPath == "") != (clientKeyPath == "") {
 		fmt.Fprintln(os.Stderr, "weeb: --client-cert and --client-key must be given together")
@@ -555,6 +590,16 @@ func runCert(args []string) int {
 	}
 	voice := errorChanFor(personaMode)
 
+	out := certOutput{
+		insecure: insecure, asJSON: asJSON, asPEM: asPEM, brief: brief,
+		check: checkMode, warnDays: warnDays, critDays: critDays,
+	}
+	if certFile != "" {
+		// --sni names the host a live chain is checked against, so it means
+		// the same for a file; --host is the spelling that reads right there.
+		return runCertFile(certFile, orFallback(fileHost, opts.sni), voice, out, logger)
+	}
+
 	rlog := logger.With("op", "cert", "target", target)
 	rlog.Info("tls inspect")
 
@@ -572,27 +617,7 @@ func runCert(args []string) int {
 	rlog.Info("tls ok",
 		"version", rep.TLSVersion, "verified", rep.Verified, "chain", len(rep.Chain))
 
-	if checkMode {
-		// --json here means the verdict object, not the full report — the
-		// check decides, so the check is what gets serialized.
-		return printCheck(outW, checkCert(rep, warnDays, critDays), asJSON)
-	}
-	if asPEM {
-		fmt.Fprint(outW, certPEM(rep))
-		return certExit(rep, insecure)
-	}
-	if asJSON {
-		out, _ := json.MarshalIndent(rep, "", "  ")
-		fmt.Fprintln(outW, string(out))
-		return certExit(rep, insecure)
-	}
-
-	// The report carries peer-controlled bytes (Subject/Issuer CNs, SANs, the
-	// verify-error string — arbitrary for any self-signed cert); outW strips
-	// hostile control sequences at a TTY.
-	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
-	fmt.Fprint(outW, renderCertReport(rep, newStyles(), color, terminalWidth(), !brief))
-	return certExit(rep, insecure)
+	return out.emit(rep)
 }
 
 // terminalWidth returns stdout's column count, or 100 when it can't be detected
@@ -842,9 +867,11 @@ USAGE
   weeb                       launch the empty interactive TUI builder
   weeb [METHOD] URL [opts]   open the TUI prefilled with the request
   weeb cert HOST [opts]      inspect a TLS certificate / chain
+  weeb cert FILE [opts]      inspect a local PEM/DER certificate file ('-' = stdin)
   weeb curl '<curl cmd>'     run a pasted curl command (import)
   weeb completion zsh|bash   print shell completion script
   weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
+  weeb view [FILE|-] [opts]  browse a JSON/XML/HTML/YAML/Markdown file, foldable
   weeb version               print the build version
 
   METHOD defaults to GET. A URL opens the interactive builder, BUT weeb runs a
@@ -946,8 +973,27 @@ CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
                         DAYS (default 30)
   -c, --crit DAYS       with --check: CRITICAL when within DAYS (default 14);
                         untrusted or expired is always CRITICAL (unless -k)
+  -f, --file PATH       read certificates from PATH ('-' = stdin) instead of
+                        dialing; PEM (any order, other blocks such as keys are
+                        skipped and never printed) or DER. A bare argument is a
+                        file when it is '-', or exists and has a '/' or a
+                        .pem/.crt/.cer/.der extension; 'example.com' always dials
+      --host NAME       with a file: also check the leaf against NAME (--sni
+                        works too); without it there is no hostname check
   exit code is non-zero when the chain is untrusted (unless -k) or expired,
   so 'weeb cert' doubles as a cron/monitoring check.
+
+VIEW (weeb view [FILE|-])  — a local jless/fx, using the response pane
+  Reads FILE, or stdin when FILE is - or omitted. At a terminal it opens the
+  pretty, foldable viewer: the response-pane keys plus ctrl+p pretty/raw,
+  ctrl+y 🌈, q or ctrl+c to quit. Piped, it prints the uncolored pretty render
+  (JSON and XML reindented; HTML, YAML and Markdown as-is), so it doubles as a
+  formatter. The format comes from the file extension, else a content sniff.
+      --type T          force the format: json | xml | html | yaml | md
+      --raw             piped: write the bytes unchanged; at a terminal: open
+                        in the raw view (ctrl+p toggles)
+      --max-body SIZE   refuse input larger than SIZE (default 64m, 0 = no cap;
+                        overrides WEEB_MAX_BODY)
 
 COMPLETION (weeb completion zsh|bash)
   prints a static tab-completion script — zsh: save it as _weeb in your $fpath;
@@ -964,13 +1010,19 @@ EXAMPLES
   weeb cert 93.184.216.34 --sni example.com
   weeb cert example.com --pem > chain.pem
   weeb cert example.com --check -w 30 -c 14
+  weeb cert ./chain.pem --host example.com
+  cat chain.pem | weeb cert - --check -w 30 -c 14
   weeb https://api.example.com/health --check --expect-body '"status": *"ok"' -w 500ms -c 2s
+  weeb view data.json
+  kubectl get pod web -o yaml | weeb view --type yaml
+  weeb view data.json > pretty.json
 
 TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
   ctrl+s send · esc stop a request/stream · ctrl+t inspect TLS cert · ctrl+x export as curl
   ctrl+p pretty · ctrl+y 🌈 · ctrl+g debug
   in the response pane: ↑↓ scroll · ←→ select section or node (JSON/XML/HTML/YAML) · enter fold · -/+ fold all
+  y copy the node's path (jq/XPath) · Y copy its value · ctrl+x also copies the curl (clipboard via OSC 52)
 
 ENVIRONMENT (prefills, applied unless you override them)
   WEEB_BASE_URL    relative URLs ("/me") resolve against this base
