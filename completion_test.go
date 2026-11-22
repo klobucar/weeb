@@ -149,6 +149,7 @@ func TestFishCompletionView(t *testing.T) {
 		"complete -c weeb -n '__fish_seen_subcommand_from view' -l type -x -a 'json xml html yaml md'",
 		"complete -c weeb -n '__fish_seen_subcommand_from view' -l raw",
 		"complete -c weeb -n '__fish_seen_subcommand_from view' -F",
+		"complete -c weeb -n '__fish_seen_subcommand_from run' -F",
 		"complete -c weeb -n '__fish_seen_subcommand_from cert tls' -l file -r -F",
 	} {
 		if !strings.Contains(s, want) {

@@ -42,6 +42,10 @@ type checkVerdict struct {
 	Message string         `json:"message"`
 	Metrics map[string]any `json:"metrics,omitempty"`
 
+	// Assertions lists every HTTP assertion with its outcome (see
+	// checkexpect.go); the plugin line only has room for the first failure.
+	Assertions []checkAssertion `json:"assertions,omitempty"`
+
 	perf string // plugin perfdata (sans '|'); JSON consumers get Metrics instead
 }
 
@@ -144,6 +148,8 @@ type checkHTTPOpts struct {
 	expectSpec string         // raw --expect-status, for the failure message
 	expect     func(int) bool // nil = the default rule: any status < 400 is OK
 	bodyRe     *regexp.Regexp // nil = no body assertion
+	headers    []headerExpect // --expect-header, in flag order
+	jsonExprs  []*jsonExpect  // --expect-json, in flag order
 	warn, crit time.Duration  // zero = no response-time threshold
 }
 
@@ -170,6 +176,20 @@ func (a cliArgs) checkOpts() (checkHTTPOpts, error) {
 			return o, fmt.Errorf("bad --expect-body pattern: %w", err)
 		}
 		o.bodyRe = re
+	}
+	for _, spec := range a.expectHeader {
+		h, err := parseExpectHeader(spec)
+		if err != nil {
+			return o, err
+		}
+		o.headers = append(o.headers, h)
+	}
+	for _, src := range a.expectJSON {
+		e, err := parseExpectJSON(src)
+		if err != nil {
+			return o, err
+		}
+		o.jsonExprs = append(o.jsonExprs, e)
 	}
 	o.warn, o.crit = a.warn, a.crit
 	return o, nil
@@ -222,7 +242,9 @@ func parseExpectStatus(spec string) (func(int) bool, error) {
 
 // checkHTTP turns a finished request into a plugin verdict. Severity order:
 // no response at all is CRITICAL, then the status assertion, an incomplete
-// body, the body pattern, and finally the response-time thresholds.
+// body, the remaining assertions in flag order (body pattern, headers, JSON),
+// and finally the response-time thresholds. Every assertion is evaluated even
+// after one fails, so the line can count the rest and --json can list them.
 func checkHTTP(res Result, o checkHTTPOpts) checkVerdict {
 	if res.Status == 0 { // never got a response
 		msg := "no response"
@@ -234,29 +256,32 @@ func checkHTTP(res Result, o checkHTTPOpts) checkVerdict {
 
 	perf := checkHTTPPerf(res, o)
 	metrics := checkHTTPMetrics(res, o)
-	verdict := func(code int, msg string) checkVerdict {
-		return newCheckVerdict("http", code, msg, perf, metrics)
-	}
 	statusTxt := fmt.Sprintf("%d %s", res.Status, res.StatusText)
 	ms := res.Timing.Total.Milliseconds()
 
-	ok, want := res.Status < 400, "status < 400"
-	if o.expect != nil {
-		ok, want = o.expect(res.Status), o.expectSpec
-	}
-	if !ok {
-		return verdict(checkCritical, fmt.Sprintf("%s (expected %s) in %d ms", statusTxt, want, ms))
-	}
 	// A passing status with res.Err set means the body read failed or was
-	// truncated at the cap — the data below would lie, so say that instead.
-	// (A non-passing status already reported above; its Err is the status
-	// error itself.)
-	if res.Err != nil && res.Status < 400 {
-		return verdict(checkCritical, fmt.Sprintf("%s but body incomplete: %s", statusTxt, checkSafe(res.Err.Error())))
+	// truncated at the cap — the body assertions would run against data that
+	// lies, so they are skipped and the line says that instead. (For a status
+	// >= 400, Err is the status error itself.)
+	incomplete := res.Err != nil && res.Status < 400
+	as := checkHTTPAssertions(res, o, statusTxt, ms, incomplete)
+	verdict := func(code int, msg string) checkVerdict {
+		v := newCheckVerdict("http", code, msg, perf, metrics)
+		v.Assertions = as
+		return v
 	}
-	if o.bodyRe != nil && !o.bodyRe.Match(res.Body) {
-		return verdict(checkCritical, fmt.Sprintf("body does not match %q (%s, %d bytes)",
-			o.bodyRe.String(), statusTxt, res.bodySize()))
+	var failed []checkAssertion
+	for _, a := range as {
+		if !a.OK && !a.skipped {
+			failed = append(failed, a)
+		}
+	}
+	if incomplete && as[0].OK { // as[0] is the status assertion
+		return verdict(checkCritical, withMoreFailed(
+			fmt.Sprintf("%s but body incomplete: %s", statusTxt, checkSafe(res.Err.Error())), len(failed)))
+	}
+	if len(failed) > 0 {
+		return verdict(checkCritical, withMoreFailed(failed[0].Message, len(failed)-1))
 	}
 	if o.crit > 0 && res.Timing.Total > o.crit {
 		return verdict(checkCritical, fmt.Sprintf("%s in %d ms (crit at %s)", statusTxt, ms, o.crit))
@@ -265,6 +290,72 @@ func checkHTTP(res Result, o checkHTTPOpts) checkVerdict {
 		return verdict(checkWarning, fmt.Sprintf("%s in %d ms (warn at %s)", statusTxt, ms, o.warn))
 	}
 	return verdict(checkOK, fmt.Sprintf("%s in %d ms, %d bytes", statusTxt, ms, res.bodySize()))
+}
+
+// checkHTTPAssertions evaluates every assertion in a fixed order (status
+// first, then body pattern, headers and JSON in flag order), so "the first
+// failure" on the plugin line is stable. An incomplete body is never matched
+// or parsed: those assertions come back skipped.
+func checkHTTPAssertions(res Result, o checkHTTPOpts, statusTxt string, ms int64, incomplete bool) []checkAssertion {
+	ok, want := res.Status < 400, "status < 400"
+	if o.expect != nil {
+		ok, want = o.expect(res.Status), o.expectSpec
+	}
+	st := checkAssertion{Type: "status", Expect: want, OK: ok, Actual: strPtr(strconv.Itoa(res.Status))}
+	if !ok {
+		st.Message = fmt.Sprintf("%s (expected %s) in %d ms", statusTxt, want, ms)
+	}
+	as := []checkAssertion{st}
+
+	skip := func(a checkAssertion) checkAssertion {
+		a.skipped, a.Message = true, a.Type+" "+a.Expect+": not checked, body incomplete"
+		return a
+	}
+	if o.bodyRe != nil {
+		a := checkAssertion{Type: "body", Expect: o.bodyRe.String()}
+		if incomplete {
+			a = skip(a)
+		} else {
+			a.Actual = strPtr(bodyExcerpt(res.Body))
+			if a.OK = o.bodyRe.Match(res.Body); !a.OK {
+				a.Message = fmt.Sprintf("body does not match %q (%s, %d bytes)", o.bodyRe.String(), statusTxt, res.bodySize())
+			}
+		}
+		as = append(as, a)
+	}
+	for _, h := range o.headers {
+		as = append(as, h.eval(res.Headers))
+	}
+	// The body is decoded once, on first use, for all --expect-json.
+	var doc any
+	var docErr error
+	decoded := false
+	for _, e := range o.jsonExprs {
+		if incomplete {
+			as = append(as, skip(checkAssertion{Type: "json", Expect: e.src}))
+			continue
+		}
+		if !decoded {
+			doc, docErr = decodeJSONBody(res.Body)
+			decoded = true
+		}
+		if docErr != nil {
+			as = append(as, checkAssertion{Type: "json", Expect: e.src,
+				Actual: strPtr(bodyExcerpt(res.Body)), Message: "json " + e.src + ": " + docErr.Error()})
+			continue
+		}
+		as = append(as, e.eval(doc))
+	}
+	return as
+}
+
+// withMoreFailed appends how many other assertions failed to the lead
+// failure, since the plugin line has room to describe only one.
+func withMoreFailed(msg string, more int) string {
+	if more <= 0 {
+		return msg
+	}
+	return fmt.Sprintf("%s (+%d more failed)", msg, more)
 }
 
 // checkHTTPPerf renders the perfdata section: response time against its

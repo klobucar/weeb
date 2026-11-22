@@ -13,7 +13,7 @@ import (
 // a subcommand or flag is added (to main's dispatch, parseCLI, or runCert),
 // extend the matching slice here and every shell picks it up.
 var (
-	completionSubcommands = []string{"cert", "curl", "completion", "history", "view", "version", "help"}
+	completionSubcommands = []string{"cert", "curl", "completion", "history", "view", "version", "help", "run"}
 	completionMethods     = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 	// Flags of a plain `weeb [METHOD] URL …` invocation (see parseCLI).
 	completionMainFlags = []string{
@@ -21,6 +21,7 @@ var (
 		"-v", "--stats", "--pretty", "--raw", "--no-tui", "--headless",
 		"-q", "--quiet", "--persona", "--to-curl", "-o", "--output",
 		"--max-body", "-h", "--help",
+		"--expect-header", "--expect-json",
 	}
 	// Flags accepted after `weeb cert` (see runCert).
 	completionCertFlags = []string{
@@ -95,6 +96,7 @@ _weeb() {
   case "${words[2]}" in
     cert|tls)   _arguments $certflags '*:host:_hosts' ;;
     completion) (( CURRENT == 3 )) && compadd zsh bash fish ;;
+    run)        _files -g '*.http' ;;
     view)       _arguments $viewflags '*:file:_files' ;;
     curl|import|version|help) ;;
     *)          _arguments $mainflags '*:url:_urls' ;;
@@ -148,6 +150,7 @@ _weeb() {
   case "${COMP_WORDS[1]}" in
     cert|tls)   COMPREPLY=($(compgen -W "$certflags" -- "$cur")) ;;
     completion) COMPREPLY=($(compgen -W "zsh bash fish" -- "$cur")) ;;
+    run)        COMPREPLY=($(compgen -f -X '!*.http' -- "$cur") $(compgen -d -- "$cur")) ;;
     view)       COMPREPLY=($(compgen -W "$viewflags" -- "$cur") $(compgen -f -- "$cur")) ;;
     curl|import|version|help) ;;
     *)          COMPREPLY=($(compgen -W "$mainflags" -- "$cur")) ;;
@@ -200,6 +203,8 @@ end
 	b.WriteString("\n# `weeb view [FILE|-]`: its flags, and file names (overriding the global -f, no-files).\n")
 	writeFishFlags(&b, "__fish_seen_subcommand_from view", completionViewFlags)
 	b.WriteString("complete -c weeb -n '__fish_seen_subcommand_from view' -F\n")
+	b.WriteString("\n# `weeb run FILE.http`: file names (fish can't filter to *.http cheaply).\n")
+	b.WriteString("complete -c weeb -n '__fish_seen_subcommand_from run' -F\n")
 	return b.String()
 }
 

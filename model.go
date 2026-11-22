@@ -118,6 +118,12 @@ type model struct {
 	respHeading string
 	lastResult  *Result
 
+	// live is the request sent from the form while it runs (its events and
+	// result arrive as liveMsgs; the stop key cancels it); stream is the event
+	// stream the response pane shows, live or finished. See streamview.go.
+	live   *liveReq
+	stream *streamView
+
 	// Collapsible response sections (Connection / Headers / Body). respPreamble
 	// (status badge) and respErr always show; respCursor is the fold cursor;
 	// foldState is sticky per-title so folds survive re-renders and cert swaps.
@@ -283,6 +289,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderResult(r)
 		return m, nil
 
+	case liveMsg:
+		return m.onLive(msg)
+
 	case certMsg:
 		m.inFlight = false
 		m.renderCert(msg)
@@ -304,7 +313,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch {
 		case key.Matches(msg, m.keys.Quit):
+			if m.live != nil {
+				m.live.cancel() // hang up a running stream rather than leave it to exit
+			}
 			return m, tea.Quit
+
+		case key.Matches(msg, m.keys.Stop) && m.live != nil:
+			m.stopLive()
+			return m, nil
 
 		case key.Matches(msg, m.keys.ToggleDebug):
 			m.showDebug = !m.showDebug
@@ -330,8 +346,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Send):
 			if !m.inFlight {
 				m.inFlight = true
-				m.flightLabel = "sending…"
-				return m, tea.Batch(m.sendCmd(), m.spinner.Tick)
+				m.flightLabel = "sending…  ·  esc stop"
+				m.live = newLiveReq()
+				return m, tea.Batch(m.sendCmd(), m.live.wait(), m.spinner.Tick)
 			}
 			return m, nil
 
@@ -455,6 +472,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.resp, cmd = m.resp.Update(msg)
+			if m.stream != nil {
+				// Scrolling up pauses a stream's auto-scroll; back at the bottom resumes it.
+				m.stream.follow = m.resp.AtBottom()
+			}
 			return m, cmd
 		}
 	}
@@ -642,9 +663,20 @@ func (m model) specFromForm() RequestSpec {
 	}
 }
 
+// sendCmd runs the form's request off the event loop. Sent with a live
+// request (ctrl+s), everything — an event stream's events, then the result —
+// reaches Update in order through m.live; without one it reports a single
+// resultMsg.
 func (m model) sendCmd() tea.Cmd {
 	spec := m.specFromForm()
 	client := m.client
+	if lv := m.live; lv != nil {
+		spec.OnStream = lv
+		return func() tea.Msg {
+			lv.finish(client.DoContext(lv.ctx, spec))
+			return nil
+		}
+	}
 	return func() tea.Msg {
 		return resultMsg(client.Do(spec))
 	}
@@ -961,8 +993,12 @@ func (m *model) renderResult(r Result) {
 	m.respSections = nil
 	m.respErr = ""
 
+	isStream := r.Stream != streamNone && m.stream != nil
 	if r.Status != 0 {
 		m.respPreamble = statusBadge(r, m.styles)
+		if isStream {
+			m.respPreamble = m.stream.badge(r, m.styles)
+		}
 		if len(r.Redirects) > 0 {
 			m.respPreamble += "\n" + renderRedirects(r.Redirects, m.styles)
 		}
@@ -986,8 +1022,11 @@ func (m *model) renderResult(r Result) {
 		}
 		m.addSection("Headers", fmt.Sprintf("%d", len(keys)), strings.TrimRight(hb.String(), "\n"))
 
-		// Body: the response payload (see addRenderedBody).
-		if len(r.Body) > 0 {
+		// Body: the response payload (see addRenderedBody). An event stream's
+		// body is its events (see streamView).
+		if isStream {
+			m.addBodySection(m.stream.summary(r), m.stream.content(m.styles, m.pretty), nil, nil, nil)
+		} else if len(r.Body) > 0 {
 			m.addRenderedBody(r.Body, r.ContentType, r.URL, bodySummary(len(r.Body), r.ContentType))
 		}
 	}
@@ -1000,7 +1039,12 @@ func (m *model) renderResult(r Result) {
 		m.respCursor = 0
 	}
 	m.setResp(m.composeResponse())
-	m.resp.GotoTop()
+	switch {
+	case !isStream:
+		m.resp.GotoTop()
+	case m.stream.follow:
+		m.resp.GotoBottom() // follow the newest event; otherwise stay where the user scrolled
+	}
 }
 
 // renderCert fills the response viewport with a TLS report (or the errorchan

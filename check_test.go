@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestCheckSafe(t *testing.T) {
@@ -412,5 +413,538 @@ func TestParseCLICheckFlags(t *testing.T) {
 	}
 	if _, err := parseCLI([]string{"https://x", "-w", "soon"}); err == nil {
 		t.Error("bad -w duration should error")
+	}
+}
+
+func TestParseExpectJSON(t *testing.T) {
+	cases := []struct {
+		expr    string
+		wantErr string // "" = must compile
+	}{
+		{`.status == "ok"`, ""},
+		{`.items[0].id != null`, ""},
+		{`.count > 0`, ""},
+		{`.version =~ "^2\."`, ""},
+		{`.data.items | length >= 1`, ""},
+		{`.a.b`, ""},
+		{`.`, ""},
+		{`. | length > 0`, ""},
+		{`.["key with spaces"] == "v"`, ""},
+		{`.[0]`, ""},
+		{`.a[-1]`, ""},
+		{`.a.["b"][0]`, ""},
+		{`.a[ 0 ]`, ""},
+		{`.n <= 1.5e3`, ""},
+		{`.o == {"a": [1, 2]}`, ""},
+		{`.s >= "2026-01-01"`, ""},
+		{`.a=="x"`, ""},
+		{`  .x  ==  1  `, ""},
+		{`.q =~ "say \"hi\""`, ""},
+
+		{``, "empty expression"},
+		{`status == "ok"`, `a path starts with "." (e.g. .status), got 's' at col 1`},
+		{`.status = "ok"`, `"=" is not an operator; compare with == at col 9`},
+		{`.status == ok`, `value ok is not JSON; strings need double quotes: "ok" at col 12`},
+		{`.status == "ok" extra`, `invalid character 'e' after top-level value`},
+		{`.status ==`, "missing a value after =="},
+		{`.status ~ 1`, "expected an operator (==, !=, <, <=, >, >=, =~), got '~' at col 9"},
+		{`.items[0`, `bad --expect-json '.items[0': unclosed "[" at col 7`},
+		{`.items[0 1]`, `expected "]", got '1' at col 10`},
+		{`.items[]`, "iterating with [] is not supported"},
+		{`.items[1.5]`, "an index must be a whole number at col 8"},
+		{`.items[99999999999999999999]`, "bad index"},
+		{`.items[x]`, `expected an index or a "key" inside [], got 'x'`},
+		{`.["a]`, "unterminated string at col 3"},
+		{`.["a\q"]`, "bad key string"},
+		{`.content-type == "x"`, `unexpected '-' (quote keys with other characters: .["my-key"]) at col 9`},
+		{`.a..b`, `expected a key or "[" after ".", got '.'`},
+		{`..a`, `recursive descent ".." is not supported`},
+		{`.a.`, `expected a key or "[" after ".", got end of expression`},
+		{`.0`, "an array index goes in brackets"},
+		{`.a | keys`, `only "| length" may follow a path, got 'k' at col 6`},
+		{`.a | length`, `"| length" needs a comparison`},
+		{`.a | length == "3"`, `"| length" is a number; compare it with a number, not string`},
+		{`.a | length =~ "3"`, `=~ matches strings, but "| length" is a number`},
+		{`.a =~ ^2`, "=~ needs a double-quoted pattern"},
+		{`.a =~ "("`, "bad pattern: error parsing regexp"},
+		{`.a =~ "x" y`, `unexpected 'y' after the pattern`},
+		{`.a =~ "abc`, "unterminated pattern string at col 7"},
+		{`.a > true`, "> compares numbers or strings, not boolean"},
+		{`.a < null`, "< compares numbers or strings, not null"},
+	}
+	for _, c := range cases {
+		_, err := parseExpectJSON(c.expr)
+		switch {
+		case c.wantErr == "" && err != nil:
+			t.Errorf("parseExpectJSON(%q): %v", c.expr, err)
+		case c.wantErr != "" && err == nil:
+			t.Errorf("parseExpectJSON(%q) should fail with %q", c.expr, c.wantErr)
+		case c.wantErr != "" && !strings.Contains(err.Error(), c.wantErr):
+			t.Errorf("parseExpectJSON(%q) error = %q, want it to contain %q", c.expr, err, c.wantErr)
+		}
+	}
+}
+
+func TestExpectJSONEval(t *testing.T) {
+	doc, err := decodeJSONBody([]byte(`{
+		"status": "ok", "count": 3, "zero": 0, "neg": -2, "float": 1.5,
+		"flag": false, "nothing": null, "version": "2.4.1", "str5": "5",
+		"name": "héllo", "key with spaces": "v", "big": 12345678901234567891,
+		"items": [{"id": 7}, {"id": null}], "data": {"items": [1, 2]},
+		"obj": {"a": [1, 2]}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		expr       string
+		wantOK     bool
+		wantMsg    string // the full failure message ("" when it passes)
+		wantActual string // "-" = no actual (nothing was there)
+	}{
+		{`.status == "ok"`, true, "", `"ok"`},
+		{`.status == "down"`, false, `json .status == "down": got "ok"`, `"ok"`},
+		{`.status != "ok"`, false, `json .status != "ok": got "ok"`, `"ok"`},
+		{`.count > 0`, true, "", "3"},
+		{`.count >= 3`, true, "", "3"},
+		{`.count < 3`, false, `json .count < 3: got 3`, "3"},
+		{`.count == 3.0`, true, "", "3"},
+		{`.float < 2`, true, "", "1.5"},
+		{`.neg < -1`, true, "", "-2"},
+		{`.big == 12345678901234567891`, true, "", "12345678901234567891"},
+		{`.big == 12345678901234567890`, false, `json .big == 12345678901234567890: got 12345678901234567891`, "12345678901234567891"},
+		{`.big > 12345678901234567890`, true, "", "12345678901234567891"},
+		{`.version =~ "^2\."`, true, "", `"2.4.1"`},
+		{`.version =~ "^3"`, false, `json .version =~ "^3": got "2.4.1"`, `"2.4.1"`},
+		{`.version >= "2.0"`, true, "", `"2.4.1"`},
+		{`.items[0].id != null`, true, "", "7"},
+		{`.items[1].id != null`, false, `json .items[1].id != null: got null`, "null"},
+		{`.items[-1].id == null`, true, "", "null"},
+		{`.items[-2].id == 7`, true, "", "7"},
+		{`.items[5].id`, false, `json .items[5].id: .items[5] is missing (.items has 2 items)`, "-"},
+		{`.data.items | length >= 1`, true, "", "2"},
+		{`.data.items | length > 2`, false, `json .data.items | length > 2: got 2`, "2"},
+		{`.missing | length >= 1`, false, `json .missing | length >= 1: got 0 (.missing is missing)`, "0"},
+		{`.name | length == 5`, true, "", "5"},
+		{`. | length > 3`, true, "", "15"},
+		{`.status`, true, "", `"ok"`},
+		{`.zero`, true, "", "0"},
+		{`.flag`, false, `json .flag: got false`, "false"},
+		{`.nothing`, false, `json .nothing: got null`, "null"},
+		{`.missing`, false, `json .missing: .missing is missing`, "-"},
+		{`.missing == null`, true, "", "-"},
+		{`.nothing.x`, false, `json .nothing.x: .nothing is null`, "-"},
+		{`.["key with spaces"] == "v"`, true, "", `"v"`},
+		{`.str5 > 0`, false, `json .str5 > 0: got "5", not a number`, `"5"`},
+		{`.count =~ "3"`, false, `json .count =~ "3": got 3, not a string`, "3"},
+		{`.items.id`, false, `json .items.id: .items is an array, cannot index it with "id"`, "-"},
+		{`.data[0]`, false, `json .data[0]: .data is an object, cannot index it with [0]`, "-"},
+		{`.status.x`, false, `json .status.x: .status is a string, cannot index it with "x"`, "-"},
+		{`.flag | length > 0`, false, `json .flag | length > 0: .flag is a boolean, which has no length`, "-"},
+		{`.obj == {"a": [1, 2.0]}`, true, "", `{"a":[1,2]}`},
+		{`.obj == {"a": [1]}`, false, `json .obj == {"a": [1]}: got {"a":[1,2]}`, `{"a":[1,2]}`},
+	}
+	for _, c := range cases {
+		e, err := parseExpectJSON(c.expr)
+		if err != nil {
+			t.Errorf("parseExpectJSON(%q): %v", c.expr, err)
+			continue
+		}
+		a := e.eval(doc)
+		if a.OK != c.wantOK || a.Message != c.wantMsg {
+			t.Errorf("%s: ok=%v message=%q, want ok=%v message=%q", c.expr, a.OK, a.Message, c.wantOK, c.wantMsg)
+		}
+		switch {
+		case c.wantActual == "-" && a.Actual != nil:
+			t.Errorf("%s: actual = %q, want none", c.expr, *a.Actual)
+		case c.wantActual != "-" && (a.Actual == nil || *a.Actual != c.wantActual):
+			t.Errorf("%s: actual = %v, want %q", c.expr, a.Actual, c.wantActual)
+		}
+	}
+}
+
+func TestCompareNumbers(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1", "2", -1},
+		{"10", "9", 1},
+		{"-10", "-9", -1},
+		{"-0", "0", 0},
+		{"-1", "0", -1},
+		{"9007199254740993", "9007199254740992", 1}, // equal as float64
+		{"123456789012345678901234567890", "123456789012345678901234567890", 0},
+		{"1", "1.0", 0},
+		{"1e3", "1000", 0},
+		{"2.5", "10", -1},
+		{"1e999", "1", 1}, // overflows float64 to +Inf, still ordered
+	}
+	for _, c := range cases {
+		if got := compareNumbers(c.a, c.b); got != c.want {
+			t.Errorf("compareNumbers(%s, %s) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestParseExpectHeader(t *testing.T) {
+	cases := []struct {
+		spec       string
+		wantName   string
+		wantAbsent bool
+		wantRe     string
+		wantErr    string
+	}{
+		{"Content-Type", "Content-Type", false, "", ""},
+		{"content-type: ^application/json", "Content-Type", false, "^application/json", ""},
+		{"  x-foo  :  bar baz  ", "X-Foo", false, "bar baz", ""},
+		{"!X-Debug", "X-Debug", true, "", ""},
+		{"! x-debug", "X-Debug", true, "", ""},
+		{"", "", false, "", "missing header name"},
+		{"!", "", false, "", "missing header name"},
+		{": x", "", false, "", "missing header name"},
+		{"Bad Name: x", "", false, "", `"Bad Name" is not a valid header name`},
+		{"!X-Debug: 1", "", false, "", "'!X-Debug' asserts absence and takes no pattern"},
+		{"X-Foo:", "", false, "", "empty pattern after ':'"},
+		{"X-Foo: (", "", false, "", "bad --expect-header 'X-Foo: (': error parsing regexp"},
+	}
+	for _, c := range cases {
+		h, err := parseExpectHeader(c.spec)
+		if c.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("parseExpectHeader(%q) error = %v, want %q", c.spec, err, c.wantErr)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseExpectHeader(%q): %v", c.spec, err)
+			continue
+		}
+		re := ""
+		if h.re != nil {
+			re = h.re.String()
+		}
+		if h.name != c.wantName || h.absent != c.wantAbsent || re != c.wantRe {
+			t.Errorf("parseExpectHeader(%q) = %+v, want name %q absent %v re %q", c.spec, h, c.wantName, c.wantAbsent, c.wantRe)
+		}
+	}
+}
+
+func TestHeaderExpectEval(t *testing.T) {
+	hdr := http.Header{
+		"Content-Type": {"application/json; charset=utf-8"},
+		"Set-Cookie":   {"a=1", "session=xyz"},
+		"X-Empty":      {""},
+	}
+	cases := []struct {
+		spec    string
+		wantOK  bool
+		wantMsg string
+	}{
+		{"Content-Type", true, ""},
+		{"content-type: ^application/json", true, ""},
+		{"Content-Type: ^text/", false, `header Content-Type "application/json; charset=utf-8" does not match "^text/"`},
+		{"Set-Cookie: ^session=", true, ""}, // any one value may match
+		{"X-Empty", true, ""},
+		{"X-Empty: ^$", true, ""},
+		{"X-Missing", false, "header X-Missing missing"},
+		{"X-Missing: x", false, "header X-Missing missing"},
+		{"!X-Missing", true, ""},
+		{"!Set-Cookie", false, `header Set-Cookie present ("a=1, session=xyz"), expected absent`},
+	}
+	for _, c := range cases {
+		h, err := parseExpectHeader(c.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := h.eval(hdr)
+		if a.OK != c.wantOK || a.Message != c.wantMsg {
+			t.Errorf("%s: ok=%v message=%q, want ok=%v message=%q", c.spec, a.OK, a.Message, c.wantOK, c.wantMsg)
+		}
+	}
+}
+
+func TestCheckClip(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"plain", "hello", "hello"},
+		{"ansi stripped", "\x1b[31mred\x1b[0m", "red"},
+		{"controls flattened", "a\nb\tc\x7fd\u009be", "a b c d e"},
+		{"invalid utf-8", "a\xffb", "a�b"},
+		{"pipe kept (line() maps it)", "a|b", "a|b"},
+		{"long cut", strings.Repeat("x", 200), strings.Repeat("x", checkActualMax-1) + "…"},
+		{"exactly max", strings.Repeat("é", checkActualMax), strings.Repeat("é", checkActualMax)},
+	}
+	for _, c := range cases {
+		if got := checkClip(c.in); got != c.want {
+			t.Errorf("%s: checkClip(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+	// A huge body is clipped without being copied whole.
+	if got := bodyExcerpt([]byte(strings.Repeat("y", 1<<20))); utf8.RuneCountInString(got) != checkActualMax || !strings.HasSuffix(got, "…") {
+		t.Errorf("bodyExcerpt of 1 MiB = %d runes %q", utf8.RuneCountInString(got), got)
+	}
+	// So is a huge JSON value.
+	big := make([]any, 100000)
+	for i := range big {
+		big[i] = map[string]any{"id": json.Number("1")}
+	}
+	if got := jsonPreview(big); utf8.RuneCountInString(got) != checkActualMax || !strings.HasPrefix(got, `[{"id":1},{"id":1}`) {
+		t.Errorf("jsonPreview of a large array = %q", got)
+	}
+}
+
+func TestCheckHTTPAssertions(t *testing.T) {
+	res := func(status int, hdr http.Header, body string) Result {
+		return Result{
+			Status: status, StatusText: http.StatusText(status), Headers: hdr,
+			Body: []byte(body), Timing: Timing{Total: time.Millisecond},
+		}
+	}
+	jsonHdr := http.Header{"Content-Type": {"application/json"}, "X-Debug": {"1"}}
+	okBody := `{"status":"ok","items":[1,2]}`
+	cases := []struct {
+		name     string
+		res      Result
+		args     cliArgs
+		wantCode int
+		wantMsg  string // the whole message
+	}{
+		{"all pass", res(200, jsonHdr, okBody),
+			cliArgs{expectHeader: []string{"Content-Type: json"}, expectJSON: []string{`.status == "ok"`, `.items | length == 2`}},
+			checkOK, "200 OK in 1 ms, 29 bytes"},
+		{"one json failure, no count", res(200, jsonHdr, `{"status":"degraded"}`),
+			cliArgs{expectJSON: []string{`.status == "ok"`}},
+			checkCritical, `json .status == "ok": got "degraded"`},
+		{"first failure leads, rest counted", res(200, jsonHdr, `{"status":"degraded"}`),
+			cliArgs{expectHeader: []string{"Content-Type", "!X-Debug"}, expectJSON: []string{`.status == "ok"`, `.items | length > 0`}},
+			checkCritical, `header X-Debug present ("1"), expected absent (+2 more failed)`},
+		{"status failure leads", res(503, jsonHdr, `{"status":"down"}`),
+			cliArgs{expectJSON: []string{`.status == "ok"`}},
+			checkCritical, `503 Service Unavailable (expected status < 400) in 1 ms (+1 more failed)`},
+		{"body pattern before headers", res(200, jsonHdr, okBody),
+			cliArgs{expectBody: "nope", expectHeader: []string{"X-Missing"}},
+			checkCritical, `body does not match "nope" (200 OK, 29 bytes) (+1 more failed)`},
+		{"non-JSON body", res(200, nil, "<html>oops</html>"),
+			cliArgs{expectJSON: []string{`.status == "ok"`}},
+			checkCritical, `json .status == "ok": body is not JSON: invalid character '<' looking for beginning of value at offset 1`},
+		{"non-JSON body fails every expression", res(200, nil, "<html>"),
+			cliArgs{expectJSON: []string{`.a`, `.b`}},
+			checkCritical, `json .a: body is not JSON: invalid character '<' looking for beginning of value at offset 1 (+1 more failed)`},
+		{"empty body", res(200, nil, ""),
+			cliArgs{expectJSON: []string{`.a`}},
+			checkCritical, `json .a: body is empty, not JSON`},
+		{"trailing data", res(200, nil, `{"a":1} {"b":2}`),
+			cliArgs{expectJSON: []string{`.a`}},
+			checkCritical, `json .a: body is not JSON: unexpected data after the value at offset 7`},
+		{"truncated JSON", res(200, nil, `{"a":[1,2`),
+			cliArgs{expectJSON: []string{`.a`}},
+			checkCritical, `json .a: body is not JSON: it ends mid-value`},
+		{"passing assertions still honor -w", res(200, jsonHdr, okBody),
+			cliArgs{expectJSON: []string{`.status == "ok"`}, warn: time.Nanosecond},
+			checkWarning, "200 OK in 1 ms (warn at 1ns)"},
+	}
+	for _, c := range cases {
+		c.args.check = true
+		v := checkHTTP(c.res, mustOpts(t, c.args))
+		if v.Code != c.wantCode || v.Message != c.wantMsg {
+			t.Errorf("%s: %d %q, want %d %q", c.name, v.Code, v.Message, c.wantCode, c.wantMsg)
+		}
+		if n := 1 + len(c.args.expectHeader) + len(c.args.expectJSON) + min(len(c.args.expectBody), 1); len(v.Assertions) != n {
+			t.Errorf("%s: %d assertions listed, want %d", c.name, len(v.Assertions), n)
+		}
+	}
+
+	// An incomplete body (read error or cap) is never parsed: the JSON
+	// assertion is skipped, not counted, and the lead says why. Header
+	// assertions don't need the body, so their failures still count.
+	trunc := res(200, jsonHdr, `{"status":"o`)
+	trunc.Err = errTest
+	v := checkHTTP(trunc, mustOpts(t, cliArgs{check: true,
+		expectHeader: []string{"X-Missing"}, expectJSON: []string{`.status == "ok"`}}))
+	if want := "200 OK but body incomplete: dial tcp: connection refused (+1 more failed)"; v.Code != checkCritical || v.Message != want {
+		t.Errorf("incomplete body: %d %q, want %q", v.Code, v.Message, want)
+	}
+	if last := v.Assertions[len(v.Assertions)-1]; last.OK || last.Actual != nil || !strings.Contains(last.Message, "not checked, body incomplete") {
+		t.Errorf("incomplete body: json assertion = %+v", last)
+	}
+}
+
+// Server-controlled header values and JSON strings reach the message: they
+// must not break the one-line format, smuggle escapes, or run long.
+func TestCheckAssertionsHostileValues(t *testing.T) {
+	res := Result{
+		Status: 200, StatusText: "OK",
+		Headers: http.Header{"Server": {"\x1b]52;c;ZXZpbA==\x07evil|pipe\nnext " + strings.Repeat("A", 500)}},
+		Body:    []byte(`{"s":"\u001b[2J|x\n` + strings.Repeat("B", 500) + `"}`),
+	}
+	v := checkHTTP(res, mustOpts(t, cliArgs{check: true,
+		expectHeader: []string{"!Server"}, expectJSON: []string{`.s == "ok"`}}))
+	line := v.line()
+	if n := strings.Count(line, "|"); n != 1 || strings.ContainsAny(line, "\x1b\x07\n") {
+		t.Errorf("hostile values broke the plugin line: %q", line)
+	}
+	if len(line) > 400 {
+		t.Errorf("hostile values were not clipped (%d bytes): %q", len(line), line)
+	}
+	for _, a := range v.Assertions {
+		if a.Actual != nil && (utf8.RuneCountInString(*a.Actual) > checkActualMax || strings.ContainsAny(*a.Actual, "\x1b\x07\n")) {
+			t.Errorf("%s actual not clipped/sanitized: %q", a.Type, *a.Actual)
+		}
+	}
+}
+
+// The --json verdict lists every assertion in order with its outcome and the
+// actual value; perfdata-derived metrics are unchanged.
+func TestCheckHTTPAssertionsJSON(t *testing.T) {
+	res := Result{
+		Status: 200, StatusText: "OK", Body: []byte(`{"status":"down","n":3}`),
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Timing:  Timing{Total: 5 * time.Millisecond},
+	}
+	out := checkHTTP(res, mustOpts(t, cliArgs{check: true, expectStatus: "2xx",
+		expectHeader: []string{"Content-Type: json", "X-Missing"},
+		expectJSON:   []string{`.status == "ok"`, `.n > 1`}})).json()
+	var v struct {
+		Status     string         `json:"status"`
+		Message    string         `json:"message"`
+		Metrics    map[string]any `json:"metrics"`
+		Assertions []struct {
+			Type    string  `json:"type"`
+			Expect  string  `json:"expect"`
+			OK      bool    `json:"ok"`
+			Actual  *string `json:"actual"`
+			Message string  `json:"message"`
+		} `json:"assertions"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("unmarshal %q: %v", out, err)
+	}
+	if v.Status != "CRITICAL" || v.Message != "header X-Missing missing (+1 more failed)" {
+		t.Errorf("verdict = %s %q", v.Status, v.Message)
+	}
+	if len(v.Metrics) != 3 || v.Metrics["http_status"] != float64(200) {
+		t.Errorf("metrics changed: %v", v.Metrics)
+	}
+	str := func(p *string) string {
+		if p == nil {
+			return "<none>"
+		}
+		return *p
+	}
+	want := []struct {
+		typ, expect string
+		ok          bool
+		actual, msg string
+	}{
+		{"status", "2xx", true, "200", ""},
+		{"header", "Content-Type: json", true, "application/json", ""},
+		{"header", "X-Missing", false, "<none>", "header X-Missing missing"},
+		{"json", `.status == "ok"`, false, `"down"`, `json .status == "ok": got "down"`},
+		{"json", ".n > 1", true, "3", ""},
+	}
+	if len(v.Assertions) != len(want) {
+		t.Fatalf("assertions = %+v", v.Assertions)
+	}
+	for i, w := range want {
+		a := v.Assertions[i]
+		if a.Type != w.typ || a.Expect != w.expect || a.OK != w.ok || str(a.Actual) != w.actual || a.Message != w.msg {
+			t.Errorf("assertion %d = {%s %q %v %q %q}, want %+v", i, a.Type, a.Expect, a.OK, str(a.Actual), a.Message, w)
+		}
+	}
+}
+
+// End to end against a real server: the new assertions pass, fail as
+// CRITICAL, treat a non-JSON body as CRITICAL, and reject a malformed
+// expression as UNKNOWN before sending, always as exactly one line.
+func TestRunCLICheckAssertions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/html" {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html>maintenance</html>"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Version", "2.4.1")
+		_, _ = w.Write([]byte(`{"status":"ok","version":"2.4.1","data":{"items":[{"id":1}]}}`))
+	}))
+	defer srv.Close()
+
+	cases := []struct {
+		name     string
+		path     string
+		headers  []string
+		exprs    []string
+		wantCode int
+		wantLine string // prefix
+	}{
+		{"pass", "/", []string{"Content-Type: ^application/json", "X-Version", "!X-Debug"},
+			[]string{`.status == "ok"`, `.version =~ "^2\."`, `.data.items | length >= 1`, `.data.items[0].id != null`, `.data`},
+			checkOK, "HTTP OK - 200 OK in "},
+		{"json fails", "/", nil, []string{`.status == "down"`},
+			checkCritical, `HTTP CRITICAL - json .status == "down": got "ok"|time=`},
+		{"header fails", "/", []string{"X-Version: ^3"}, nil,
+			checkCritical, `HTTP CRITICAL - header X-Version "2.4.1" does not match "^3"|time=`},
+		{"non-JSON body", "/html", nil, []string{`.status == "ok"`},
+			checkCritical, `HTTP CRITICAL - json .status == "ok": body is not JSON: invalid character '<'`},
+		{"bad expression", "/", nil, []string{`.status = "ok"`},
+			checkUnknown, `HTTP UNKNOWN - bad --expect-json '.status = "ok"': "=" is not an operator; compare with == at col 9`},
+		{"bad header spec", "/", []string{"!X: y"}, nil,
+			checkUnknown, `HTTP UNKNOWN - bad --expect-header '!X: y': '!X' asserts absence and takes no pattern`},
+	}
+	for _, c := range cases {
+		buf := swapOutW(t)
+		code := runCLI(cliArgs{method: "GET", url: srv.URL + c.path, check: true, expectHeader: c.headers, expectJSON: c.exprs})
+		out := buf.String()
+		if code != c.wantCode || !strings.HasPrefix(out, c.wantLine) {
+			t.Errorf("%s: exit %d, output %q; want %d and prefix %q", c.name, code, out, c.wantCode, c.wantLine)
+		}
+		if strings.Count(out, "\n") != 1 || !strings.HasSuffix(out, "\n") {
+			t.Errorf("%s: plugin output must be exactly one line: %q", c.name, out)
+		}
+	}
+
+	// --json: every assertion is listed, with the same exit code.
+	buf := swapOutW(t)
+	code := runCLI(cliArgs{method: "GET", url: srv.URL, check: true, checkJSON: true,
+		expectHeader: []string{"X-Version"}, expectJSON: []string{`.status == "ok"`, `.version == "3"`}})
+	var v struct {
+		Status     string `json:"status"`
+		Assertions []struct {
+			Type   string `json:"type"`
+			OK     bool   `json:"ok"`
+			Actual string `json:"actual"`
+		} `json:"assertions"`
+	}
+	if err := json.Unmarshal([]byte(buf.String()), &v); err != nil {
+		t.Fatalf("output is not JSON: %q (%v)", buf.String(), err)
+	}
+	if code != checkCritical || v.Status != "CRITICAL" || len(v.Assertions) != 4 ||
+		v.Assertions[1].Actual != "2.4.1" || v.Assertions[3].OK || v.Assertions[3].Actual != `"2.4.1"` {
+		t.Errorf("json verdict (exit %d) = %+v", code, v)
+	}
+}
+
+func TestParseCLIExpectAssertionFlags(t *testing.T) {
+	a, err := parseCLI([]string{"https://x", "--check",
+		"--expect-header", "Content-Type: json", "--expect-json", ".a == 1",
+		"--expect-header", "!X-Debug", "--expect-json", ".b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(a.expectHeader, ",") != "Content-Type: json,!X-Debug" || strings.Join(a.expectJSON, ",") != ".a == 1,.b" {
+		t.Errorf("repeatable flags = %q / %q", a.expectHeader, a.expectJSON)
+	}
+	for _, flag := range []string{"--expect-header", "--expect-json"} {
+		if _, err := parseCLI([]string{"https://x", "--check", flag}); err == nil {
+			t.Errorf("%s without a value should error", flag)
+		}
+	}
+	// Like the other assertion flags, they refuse to run without --check
+	// rather than silently not asserting.
+	if code := runCLI(cliArgs{method: "GET", url: "http://x", expectHeader: []string{"X"}}); code != 2 {
+		t.Errorf("--expect-header without --check: exit = %d, want 2", code)
+	}
+	if code := runCLI(cliArgs{method: "GET", url: "http://x", expectJSON: []string{".a"}}); code != 2 {
+		t.Errorf("--expect-json without --check: exit = %d, want 2", code)
 	}
 }
