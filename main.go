@@ -927,7 +927,7 @@ USAGE
   weeb cert HOST [opts]      inspect a TLS certificate / chain
   weeb cert FILE [opts]      inspect a local PEM/DER certificate file ('-' = stdin)
   weeb curl '<curl cmd>'     run a pasted curl command (import)
-  weeb completion zsh|bash   print shell completion script
+  weeb completion SHELL      print shell completion script (zsh|bash|fish)
   weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
   weeb audit URL [opts]      grade a page's security headers
   weeb run FILE [NAME|N]     list the requests in a .http file / run one
@@ -1109,9 +1109,10 @@ VIEW (weeb view [FILE|-])  — a local jless/fx, using the response pane
       --max-body SIZE   refuse input larger than SIZE (default 64m, 0 = no cap;
                         overrides WEEB_MAX_BODY)
 
-COMPLETION (weeb completion zsh|bash)
+COMPLETION (weeb completion zsh|bash|fish)
   prints a static tab-completion script — zsh: save it as _weeb in your $fpath;
-  bash: add 'eval "$(weeb completion bash)"' to ~/.bashrc.
+  bash: add 'eval "$(weeb completion bash)"' to ~/.bashrc;
+  fish: weeb completion fish > ~/.config/fish/completions/weeb.fish
 
 EXAMPLES
   weeb GET  https://api.example.com/me
