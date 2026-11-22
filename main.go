@@ -63,6 +63,8 @@ func main() {
 		os.Exit(runCompletion(args[1:], os.Stdout))
 	case "history":
 		os.Exit(runHistory(args[1:]))
+	case "run":
+		os.Exit(runHTTPFile(args[1:]))
 	}
 
 	parsed, err := parseCLI(args)
@@ -838,6 +840,7 @@ USAGE
   weeb curl '<curl cmd>'     run a pasted curl command (import)
   weeb completion zsh|bash   print shell completion script
   weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
+  weeb run FILE [NAME|N]     list the requests in a .http file / run one
   weeb version               print the build version
 
   METHOD defaults to GET. A URL opens the interactive builder, BUT weeb runs a
@@ -904,6 +907,18 @@ CURL IMPORT (weeb curl '<command>')
   flags (-L, -k, --compressed, …) are ignored. The command may be one quoted
   string or already shell-split.
     weeb curl 'curl -X POST https://api.example.com/u -H "Accept: application/json" -d @body.json'
+
+HTTP FILES (weeb run FILE.http [NAME|N])
+  Run requests from a VS Code REST Client / JetBrains HTTP Client .http file.
+  With no NAME or N, list the requests; otherwise run one: the TUI opens
+  prefilled at a terminal, headless when piped. Supports ### separators,
+  # @name, @var = value, {{var}}, {{$processEnv VAR}} / {{$env.VAR}}, ?/& query
+  lines and < ./file body includes. Response chaining isn't supported.
+      --env NAME        take variables from environment NAME in
+                        http-client.env.json (+ http-client.private.env.json)
+      --no-tui          run headless even at a terminal (alias --headless)
+    weeb run api.http             list the requests
+    weeb run api.http login       run the request named login (or by number: 1)
 
 CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   -k, --insecure        inspect even if the chain is untrusted/expired
