@@ -63,6 +63,8 @@ func main() {
 		os.Exit(runCompletion(args[1:], os.Stdout))
 	case "history":
 		os.Exit(runHistory(args[1:]))
+	case "audit":
+		os.Exit(runAudit(args[1:]))
 	}
 
 	parsed, err := parseCLI(args)
@@ -838,6 +840,7 @@ USAGE
   weeb curl '<curl cmd>'     run a pasted curl command (import)
   weeb completion zsh|bash   print shell completion script
   weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
+  weeb audit URL [opts]      grade a page's security headers
   weeb version               print the build version
 
   METHOD defaults to GET. A URL opens the interactive builder, BUT weeb runs a
@@ -932,6 +935,20 @@ CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
   exit code is non-zero when the chain is untrusted (unless -k) or expired,
   so 'weeb cert' doubles as a cron/monitoring check.
 
+AUDIT OPTIONS (weeb audit URL)  — grade a page's security headers
+  GETs the URL, follows redirects, and grades the final response's HSTS, CSP,
+  X-Content-Type-Options, clickjacking (frame-ancestors / X-Frame-Options),
+  Referrer-Policy, Permissions-Policy, COOP/CORP, Set-Cookie flags, CORS, and
+  version banners: pass / warn / fail, each with a reason. A bare host means
+  https. Exits 0 once audited (1 if unreachable); --check grades the exit.
+  -H, --header "K: V"   add a request header (repeatable)
+      --timeout DUR     request timeout (default 30s)
+      --json            emit the report as JSON; with --check, the verdict
+                        object ({check, status, code, message, metrics})
+      --check           monitoring-plugin mode: one "AUDIT WARNING - ..." line;
+                        any fail is CRITICAL, any warn WARNING (alias --nagios)
+      --persona MODE    error voice for fetch failures (see --persona above)
+
 COMPLETION (weeb completion zsh|bash)
   prints a static tab-completion script — zsh: save it as _weeb in your $fpath;
   bash: add 'eval "$(weeb completion bash)"' to ~/.bashrc.
@@ -948,6 +965,8 @@ EXAMPLES
   weeb cert example.com --pem > chain.pem
   weeb cert example.com --check -w 30 -c 14
   weeb https://api.example.com/health --check --expect-body '"status": *"ok"' -w 500ms -c 2s
+  weeb audit example.com
+  weeb audit https://example.com/login --check
 
 TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
