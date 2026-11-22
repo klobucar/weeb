@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -381,6 +382,9 @@ func TestResolveHTTPDynamicVars(t *testing.T) {
 
 // Resolve errors name the variable and line, and never an env value.
 func TestResolveHTTPErrors(t *testing.T) {
+	// The OS wording for a missing file differs between Unix and Windows.
+	_, openErr := os.Open(filepath.Join(t.TempDir(), "missing"))
+	notFound := errors.Unwrap(openErr).Error()
 	const secret = "s3cret-value-xyz"
 	t.Setenv("WEEB_T_SECRET", secret)
 
@@ -398,7 +402,7 @@ func TestResolveHTTPErrors(t *testing.T) {
 		{"unsupported dynamic variable", "GET https://x/{{$randomInt 1 10}}\n", "", "line 1: unsupported dynamic variable {{$randomInt 1 10}}"},
 		{"env-file indirection", "GET https://x/{{$processEnv %TOKEN}}\n", "", "{{$processEnv %TOKEN}} isn't supported"},
 		{"empty reference", "GET https://x/{{ }}\n", "", "line 1: empty variable {{}}"},
-		{"missing include named as written", "POST https://x\n\n< ./{{$processEnv WEEB_T_SECRET}}.json\n", "", "line 3: include ./{{$processEnv WEEB_T_SECRET}}.json: no such file"},
+		{"missing include named as written", "POST https://x\n\n< ./{{$processEnv WEEB_T_SECRET}}.json\n", "", "line 3: include ./{{$processEnv WEEB_T_SECRET}}.json: " + notFound},
 		{"undefined after a secret expanded", "@tok = {{$processEnv WEEB_T_SECRET}}\nGET https://x/{{tok}}/{{nope}}\n", "", "line 2: undefined variable {{nope}}"},
 		{"undefined inside an expanded include", "POST https://x\n\n<@ ./tmpl.json\n", "", "./tmpl.json (included on line 3): undefined variable {{who}}"},
 	}
@@ -607,6 +611,8 @@ func captureFile(t *testing.T, f **os.File) func() string {
 }
 
 func TestRunHTTPFileExitCodes(t *testing.T) {
+	_, openErr := os.Open(filepath.Join(t.TempDir(), "missing"))
+	notFound := errors.Unwrap(openErr).Error() // OS-specific wording
 	const secret = "s3cret-run-value"
 	t.Setenv("WEEB_T_SECRET", secret)
 	dir := t.TempDir()
@@ -632,7 +638,7 @@ GET http://127.0.0.1:1/me/{{nope}}
 		wantOut string
 	}{
 		{"no file", nil, 2, "run needs a .http file", ""},
-		{"missing file", []string{filepath.Join(dir, "nope.http")}, 2, "no such file", ""},
+		{"missing file", []string{filepath.Join(dir, "nope.http")}, 2, notFound, ""},
 		{"unknown flag", []string{api, "--nope"}, 2, `unknown flag "--nope"`, ""},
 		{"extra argument", []string{api, "login", "extra"}, 2, `unexpected argument "extra"`, ""},
 		{"--env without a value", []string{api, "login", "--env"}, 2, "--env needs a value", ""},
