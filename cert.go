@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"math/big"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -39,7 +41,49 @@ type certReport struct {
 	SCTCount    int        `json:"sct_count"`
 	Chain       []certInfo `json:"chain"`
 
-	rawCerts [][]byte // DER of each presented cert, for --pem (not serialized)
+	// Set only by `weeb cert FILE` (certfile.go). A file has no handshake, so
+	// the connection fields above stay empty and MarshalJSON switches to
+	// certFileJSON, which leaves them out.
+	File          string     `json:"-"` // path as given; "-" is stdin
+	Format        string     `json:"-"` // "PEM" or "DER"
+	Hostname      string     `json:"-"` // name the leaf was checked against; "" = no hostname check
+	SkippedBlocks []string   `json:"-"` // types of non-certificate PEM blocks, never their contents
+	Unreadable    []string   `json:"-"` // CERTIFICATE blocks x509 rejected, with the reason
+	Others        []certInfo `json:"-"` // certs in the file that aren't on the leaf's issuer path
+
+	rawCerts [][]byte // DER of each presented cert (then Others), for --pem (not serialized)
+}
+
+// MarshalJSON keeps the network report's JSON exactly as it was and gives a
+// file report its own shape without the handshake fields.
+func (r *certReport) MarshalJSON() ([]byte, error) {
+	if r.File == "" {
+		type plain certReport // same fields and tags, without this method
+		return json.Marshal((*plain)(r))
+	}
+	return json.Marshal(certFileJSON{
+		File: r.File, Format: r.Format, Hostname: r.Hostname,
+		Verified: r.Verified, VerifyErr: r.VerifyErr, Skipped: r.Skipped,
+		SkippedBlocks: r.SkippedBlocks, Unreadable: r.Unreadable,
+		Chain: r.Chain, Others: r.Others,
+	})
+}
+
+// label names what was inspected, for headings and the --check line:
+// host:port for an endpoint, the path (or "stdin") for a file.
+func (r *certReport) label() string {
+	if r.File != "" {
+		return certSourceName(r.File)
+	}
+	return r.Host + ":" + r.Port
+}
+
+// certSourceName is how a file argument is shown: "-" reads as "stdin".
+func certSourceName(path string) string {
+	if path == "-" {
+		return "stdin"
+	}
+	return path
 }
 
 // certOptions configures a TLS inspection. The zero value dials the target's own
@@ -485,13 +529,50 @@ func certExit(rep *certReport, insecure bool) int {
 	return 0
 }
 
+// certOutput is how runCert presents a finished report. The network and file
+// paths share it, so the --check line, --pem, --json, the report and the exit
+// code can't drift apart between them.
+type certOutput struct {
+	insecure, asJSON, asPEM, brief, check bool
+	warnDays, critDays                    int
+}
+
+func (o certOutput) emit(rep *certReport) int {
+	if o.check {
+		// --json here means the verdict object, not the full report — the
+		// check decides, so the check is what gets serialized.
+		return printCheck(outW, checkCert(rep, o.warnDays, o.critDays), o.asJSON)
+	}
+	if o.asPEM {
+		fmt.Fprint(outW, certPEM(rep))
+		return certExit(rep, o.insecure)
+	}
+	if o.asJSON {
+		out, _ := json.MarshalIndent(rep, "", "  ")
+		fmt.Fprintln(outW, string(out))
+		return certExit(rep, o.insecure)
+	}
+
+	// The report carries peer-controlled bytes (Subject/Issuer CNs, SANs, the
+	// verify-error string — arbitrary for any self-signed cert); outW strips
+	// hostile control sequences at a TTY.
+	color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
+	fmt.Fprint(outW, renderCertReport(rep, newStyles(), color, terminalWidth(), !o.brief))
+	return certExit(rep, o.insecure)
+}
+
 // renderCertReport produces the human-facing TLS report, colorized when color
 // is true.
 func renderCertReport(rep *certReport, st styles, colorize bool, width int, detail bool) string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(cPink)
 
+	head := fmt.Sprintf("🔒 TLS  %s:%s", rep.Host, rep.Port)
+	if rep.File != "" {
+		head = "📄 CERT  " + rep.label()
+	}
+
 	var b strings.Builder
-	b.WriteString(paintIf(colorize, title, fmt.Sprintf("🔒 TLS  %s:%s", rep.Host, rep.Port)) + "\n")
+	b.WriteString(paintIf(colorize, title, head) + "\n")
 	for _, s := range certSections(rep, st, colorize, width, detail) {
 		head := paintIf(colorize, st.paneTitle, s.title)
 		if s.summary != "" {
@@ -519,33 +600,31 @@ type certSection struct {
 // relies on folding to tuck the detail away.
 func certSections(rep *certReport, st styles, colorize bool, width int, detail bool) []certSection {
 	ok := lipgloss.NewStyle().Bold(true).Foreground(cGreen)
-	bad := lipgloss.NewStyle().Bold(true).Foreground(cRed)
 
 	var secs []certSection
 
-	var cb strings.Builder
-	if rep.StartTLS != "" {
-		certRow(&cb, st, colorize, width, "STARTTLS", strings.ToLower(rep.StartTLS))
+	if rep.File != "" {
+		// A file has no connection; its section says where the certs came
+		// from instead, and the handshake rows are left out, not zeroed.
+		secs = append(secs, certFileSection(rep, st, colorize, width))
+	} else {
+		var cb strings.Builder
+		if rep.StartTLS != "" {
+			certRow(&cb, st, colorize, width, "STARTTLS", strings.ToLower(rep.StartTLS))
+		}
+		if rep.SNI != "" && rep.SNI != rep.Host {
+			certRow(&cb, st, colorize, width, "SNI", rep.SNI)
+		}
+		certRow(&cb, st, colorize, width, "Protocol", rep.TLSVersion)
+		certRow(&cb, st, colorize, width, "Cipher", rep.Cipher)
+		if rep.ALPN != "" {
+			certRow(&cb, st, colorize, width, "ALPN", rep.ALPN)
+		}
+		certTrustRow(&cb, rep, st, colorize, width, "chain & hostname")
+		certRow(&cb, st, colorize, width, "OCSP", yesNo(rep.OCSPStapled, "stapled", "not stapled", st, ok, colorize))
+		certRow(&cb, st, colorize, width, "SCTs", fmt.Sprintf("%d embedded", rep.SCTCount))
+		secs = append(secs, certSection{title: "🤝 Connection", body: strings.TrimRight(cb.String(), "\n")})
 	}
-	if rep.SNI != "" && rep.SNI != rep.Host {
-		certRow(&cb, st, colorize, width, "SNI", rep.SNI)
-	}
-	certRow(&cb, st, colorize, width, "Protocol", rep.TLSVersion)
-	certRow(&cb, st, colorize, width, "Cipher", rep.Cipher)
-	if rep.ALPN != "" {
-		certRow(&cb, st, colorize, width, "ALPN", rep.ALPN)
-	}
-	switch {
-	case rep.Skipped:
-		certRow(&cb, st, colorize, width, "Trust", paintIf(colorize, st.meta, "— not checked (insecure)"))
-	case rep.Verified:
-		certRow(&cb, st, colorize, width, "Trust", trustBadge("✓ TRUSTED", cGreen, colorize)+paintIf(colorize, st.meta, "  chain & hostname"))
-	default:
-		certRow(&cb, st, colorize, width, "Trust", trustBadge("✗ UNTRUSTED", cRed, colorize)+"  "+paintIf(colorize, bad, rep.VerifyErr))
-	}
-	certRow(&cb, st, colorize, width, "OCSP", yesNo(rep.OCSPStapled, "stapled", "not stapled", st, ok, colorize))
-	certRow(&cb, st, colorize, width, "SCTs", fmt.Sprintf("%d embedded", rep.SCTCount))
-	secs = append(secs, certSection{title: "🤝 Connection", body: strings.TrimRight(cb.String(), "\n")})
 
 	if len(rep.Chain) == 0 {
 		return secs
@@ -561,11 +640,18 @@ func certSections(rep *certReport, st styles, colorize bool, width int, detail b
 		}
 		lb.WriteString("  " + pad + conn + c.name + paintIf(colorize, st.meta, "  "+c.role) + "\n")
 	}
+	chainSummary := fmt.Sprintf("%d presented", len(rep.Chain))
+	if rep.File != "" {
+		chainSummary = fmt.Sprintf("%d from file, ordered leaf → root", len(rep.Chain))
+	}
 	secs = append(secs, certSection{
 		title:   "🔗 Chain",
-		summary: fmt.Sprintf("%d presented", len(rep.Chain)),
+		summary: chainSummary,
 		body:    strings.TrimRight(lb.String(), "\n"),
 	})
+	if len(rep.Others) > 0 {
+		secs = append(secs, certOthersSection(rep, colorize))
+	}
 
 	// Full detail per presented cert. Titles are unique (Intermediate 2, …) so the
 	// TUI's title-keyed fold state stays stable across re-renders.
@@ -611,6 +697,21 @@ func certSections(rep *certReport, st styles, colorize bool, width int, detail b
 		})
 	}
 	return secs
+}
+
+// certTrustRow writes the Trust verdict row. scope says what a TRUSTED
+// verdict covered: "chain & hostname" for a live endpoint, less for a file
+// checked without --host.
+func certTrustRow(b *strings.Builder, rep *certReport, st styles, colorize bool, width int, scope string) {
+	bad := lipgloss.NewStyle().Bold(true).Foreground(cRed)
+	switch {
+	case rep.Skipped:
+		certRow(b, st, colorize, width, "Trust", paintIf(colorize, st.meta, "— not checked (insecure)"))
+	case rep.Verified:
+		certRow(b, st, colorize, width, "Trust", trustBadge("✓ TRUSTED", cGreen, colorize)+paintIf(colorize, st.meta, "  "+scope))
+	default:
+		certRow(b, st, colorize, width, "Trust", trustBadge("✗ UNTRUSTED", cRed, colorize)+"  "+paintIf(colorize, bad, rep.VerifyErr))
+	}
 }
 
 // paintIf renders s only when colorize is set, else returns txt verbatim.

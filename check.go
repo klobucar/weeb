@@ -104,7 +104,7 @@ func checkSafe(s string) string {
 // chain fails verification and that path fires instead). Trust is CRITICAL
 // unless -k skipped the check, mirroring the normal exit-code rule.
 func checkCert(rep *certReport, warnDays, critDays int) checkVerdict {
-	target := checkSafe(rep.Host + ":" + rep.Port)
+	target := checkSafe(rep.label()) // host:port, or the file for `weeb cert FILE`
 	if len(rep.Chain) == 0 {
 		return newCheckVerdict("cert", checkUnknown, target+" presented no certificates", "", nil)
 	}
