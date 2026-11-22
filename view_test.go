@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,6 +78,11 @@ func TestViewFormatDetection(t *testing.T) {
 }
 
 func TestLoadViewDoc(t *testing.T) {
+	// The OS wording for a missing file differs ("no such file or directory" on
+	// Unix, "The system cannot find the file specified." on Windows).
+	_, openErr := os.Open(filepath.Join(t.TempDir(), "missing"))
+	notFound := errors.Unwrap(openErr).Error()
+
 	old := maxBodyBytes
 	maxBodyBytes = 16
 	t.Cleanup(func() { maxBodyBytes = old })
@@ -107,7 +113,7 @@ func TestLoadViewDoc(t *testing.T) {
 		{"no file reads stdin", "", "piped", "stdin", "piped", ""},
 		{"over the cap", tooBig, "", "", "", "--max-body"},
 		{"stdin over the cap", "", strings.Repeat("y", 17), "", "", "--max-body"},
-		{"missing file", filepath.Join(dir, "nope.json"), "", "", "", "no such file"},
+		{"missing file", filepath.Join(dir, "nope.json"), "", "", "", notFound},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
