@@ -29,6 +29,10 @@ type xnode struct {
 	text     string     // text / comment / proc-inst / directive content
 	children []*xnode
 	folded   bool
+
+	// start/end are the element's byte span in the body (parseXMLTree only;
+	// zero for HTML), so a copy can hand back the exact source fragment.
+	start, end int
 }
 
 // parseXMLTree parses a body into a fold tree when it is (or sniffs as)
@@ -43,7 +47,9 @@ func parseXMLTree(body []byte, contentType, url string, sniff bool) *xnode {
 
 	root := &xnode{kind: xElem}
 	stack := []*xnode{root}
+	var prevOff int64
 	for {
+		off := dec.InputOffset()
 		tok, err := dec.Token()
 		if err == io.EOF {
 			break
@@ -59,11 +65,17 @@ func parseXMLTree(body []byte, contentType, url string, sniff bool) *xnode {
 			if len(stack) > maxTreeDepth {
 				return nil
 			}
-			n := &xnode{kind: xElem, name: t.Name.Local, attrs: append([]xml.Attr(nil), t.Attr...)}
+			n := &xnode{kind: xElem, name: t.Name.Local, attrs: append([]xml.Attr(nil), t.Attr...), start: int(off)}
+			if dec.InputOffset() == off {
+				// Replayed from the decoder's lookahead: the previous call read
+				// this tag but returned an auto-close of a void element first.
+				n.start = int(prevOff)
+			}
 			cur.children = append(cur.children, n)
 			stack = append(stack, n)
 		case xml.EndElement:
 			if len(stack) > 1 {
+				stack[len(stack)-1].end = int(dec.InputOffset())
 				stack = stack[:len(stack)-1]
 			}
 		case xml.CharData:
@@ -77,6 +89,7 @@ func parseXMLTree(body []byte, contentType, url string, sniff bool) *xnode {
 		case xml.Directive:
 			cur.children = append(cur.children, &xnode{kind: xDirective, text: strings.TrimSpace(string(t))})
 		}
+		prevOff = off
 	}
 	if len(root.children) == 0 {
 		return nil

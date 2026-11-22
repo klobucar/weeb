@@ -45,6 +45,7 @@ own site, leaf → ISRG Root:
 - **curl-shaped CLI** — `-H`, `-d @file`/`-`/stdin, `-X`, interleaved flags and positionals, just like you already type.
 - **curl import & export** — paste a `curl` command to run it (`weeb curl '…'`), or turn any request into one (`--to-curl`, or `ctrl+x` in the TUI).
 - **Pretty bodies** — JSON, XML, HTML & YAML get syntax color and **collapsible folding**; Markdown gets a full [Glamour](https://github.com/charmbracelet/glamour) render. `--raw` for the exact bytes.
+- **File viewer** — `weeb view data.json` (or `… | weeb view`) browses a local JSON/XML/HTML/YAML/Markdown file in the same foldable pane, like jless or fx; piped, it's a pretty-printer.
 - **TLS inspection** — a friendlier `openssl s_client`: full chain, expiry, SANs, ciphers, OCSP/SCT, plus `--starttls`, `--sni` override, `--alpn`, version pinning, client certs, and `--pem` dump.
 - **Timing breakdown** — per-phase DNS / TCP / TLS / send / wait / recv stats with a colored bar.
 - **Latency mini-benchmark** — `--repeat N` sends a request N times and reports min/p50/p90/p99/max per phase, over pooled or `--fresh` connections.
@@ -141,6 +142,53 @@ In the response pane, fold to cut the noise:
 | `enter` | Fold / unfold the selection |
 | `-` / `+` | Fold / unfold everything |
 
+## Viewing files
+
+`weeb view` points the response pane at a local file instead of a request, so
+it works as a JSON/XML/HTML/YAML/Markdown viewer in the vein of jless or fx:
+
+```sh
+weeb view data.json
+weeb view - < page.html
+kubectl get pod web -o yaml | weeb view --type yaml
+```
+
+It reads FILE, or stdin when FILE is `-` or left out. There's no Content-Type,
+so the format comes from the file extension, then a content sniff, just like a
+response with a generic Content-Type. YAML is never sniffed, so piped YAML needs
+`--type yaml`, and XML without an `<?xml …?>` declaration sniffs as HTML unless
+you pass `--type xml`. The pane's Body summary shows the file name, size and
+format.
+
+At a terminal it opens a viewer-only TUI with no request form. Even with the
+data piped in, keys come from the terminal (`/dev/tty`, or `CONIN$` on Windows).
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Scroll |
+| `←` / `→` | Select a section or node |
+| `enter` | Fold / unfold the selection |
+| `-` / `+` | Fold / unfold everything |
+| `ctrl+p` | Toggle pretty / raw |
+| `ctrl+y` | Toggle 🌈 mode |
+| `q` · `ctrl+c` | Quit |
+
+Piped or redirected, it prints the pretty render without color instead, so it
+doubles as a formatter: `weeb view data.json > pretty.json`. JSON and XML are
+reindented; HTML, YAML and Markdown come out as their source, since their
+pretty forms are color-only.
+
+| Flag | Description |
+|------|-------------|
+| `--type T` | Force the format: `json` · `xml` · `html` · `yaml` · `md` |
+| `--raw` | Piped: write the bytes unchanged. At a terminal: open in the raw view |
+| `--max-body SIZE` | Refuse input larger than SIZE (default `64m`, `0` = no cap; overrides `WEEB_MAX_BODY`) |
+
+Files are treated as untrusted, like response bodies (you may be viewing
+something you just downloaded). Terminal control sequences in the content are
+stripped before they reach the screen, and a file name containing control
+characters is shown quoted.
+
 ## curl import & export
 
 Paste a `curl` command — from API docs or your browser's "Copy as cURL" — and
@@ -164,7 +212,8 @@ Going the other way, turn the request you just built into a shareable command:
 weeb POST https://api.example.com/users -H "Accept: application/json" -d '{"a":1}' --to-curl
 ```
 
-In the TUI, `ctrl+x` shows the curl equivalent of the current form.
+In the TUI, `ctrl+x` shows the curl equivalent of the current form and copies
+it to your clipboard.
 
 ## History
 
@@ -217,12 +266,38 @@ weeb cert example.com --pem > chain.pem
 | `--tls VERSION` | Pin the handshake to `1.0`/`1.1`/`1.2`/`1.3` |
 | `--client-cert F` · `--client-key F` | Present a client certificate for mTLS (aliases `--cert`/`--key`) |
 | `--timeout DUR` | Dial timeout (default 30s) |
+| `-f, --file PATH` | Read certificates from a local PEM/DER file (`-` = stdin) instead of dialing |
+| `--host NAME` | With a file: also check the leaf against this hostname (`--sni` works too) |
 
 The exit code is non-zero when the chain is untrusted (unless `-k`) or expired,
 so `weeb cert` doubles as a cron/monitoring check. In the TUI, `ctrl+t` inspects
 the cert of the URL you're pointed at — the report folds like a response, so each
 cert in the chain is a collapsible section (the leaf shows on load; the CA certs
 above it start folded — `←`/`→` to select, `enter` to open, `±` for all).
+
+### Certificate files
+
+`weeb cert` reads local certificates too, as a friendlier `openssl x509 -text`:
+
+```sh
+weeb cert ./chain.pem                     # PEM, any number of certs in any order
+weeb cert server.der                      # or DER
+cat chain.pem | weeb cert -               # or stdin
+weeb cert server.crt --host example.com   # also check the leaf against a name
+weeb cert bundle.pem --check -w 30 -c 14  # the same expiry check as a live host
+```
+
+An argument is read as a file when it's `-`, or when it exists and has a `/`
+or a `.pem`/`.crt`/`.cer`/`.der` extension. A bare `example.com` is always
+dialed, even if a file by that name exists; use `-f example.com` to read it.
+weeb orders the certs leaf → root by issuer and verifies the leaf against
+the system roots, with the file's other certs as intermediates. Without
+`--host` there's no hostname check. The report, `--json`, `--pem`, `--brief`,
+`--check` and the exit codes work as for a live host. Handshake details
+(protocol, cipher, ALPN, OCSP stapling, SCTs) are left out because a file
+doesn't have them. Other PEM blocks, such as a private key in a bundle, are
+skipped and never printed. A certificate Go can't parse (a few legacy CA
+roots) is skipped with a note rather than failing the whole file.
 
 ## Monitoring (`--check`)
 
@@ -335,11 +410,22 @@ request. Repeated requests aren't recorded in `weeb history`.
 | `ctrl+o` / `ctrl+r` | Add / remove a header row |
 | `ctrl+s` | Send the request |
 | `ctrl+t` | Inspect the TLS cert |
-| `ctrl+x` | Export the current request as `curl` |
+| `ctrl+x` | Export the current request as `curl` and copy it to the clipboard |
+| `y` / `Y` | Copy the selected node's path / value (response pane only) |
 | `ctrl+p` | Toggle pretty / raw |
 | `ctrl+y` | Toggle 🌈 mode |
 | `ctrl+g` | Toggle the debug log pane |
 | `ctrl+c` | Quit |
+
+Copying uses OSC 52, so it works over SSH with nothing extra installed, as long
+as your terminal allows it (iTerm2: *Applications in terminal may access
+clipboard*; tmux: `set -g set-clipboard on`). `y` copies a jq path for JSON and
+YAML (`.items[3]`, `.["weird key"]`) or an XPath-like one for XML and HTML
+(`/root/item[3]`). `Y` copies the value: compact JSON, the YAML fragment, or the
+element's source. On a section heading, `Y` copies that section, and on **Body**
+the raw body. Copies are plain text, with styling and control characters
+stripped, and anything over 75 KB is truncated (terminals drop larger OSC 52
+writes); the status line says when that happens.
 
 ## Environment
 
