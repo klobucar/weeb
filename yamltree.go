@@ -43,37 +43,49 @@ func parseYAMLTree(body []byte, contentType, url string, sniff bool) *ynode {
 	if doc.Kind == 0 || len(doc.Content) == 0 {
 		return nil
 	}
-	root := buildYNode(doc.Content[0], "")
-	if root == nil || root.kind == yScalar {
-		return nil // nothing structural to fold
+	root, err := buildYNode(doc.Content[0], "", 0)
+	if err != nil || root == nil || root.kind == yScalar {
+		return nil // too deep, or nothing structural to fold
 	}
 	return root
 }
 
-func buildYNode(n *yaml.Node, key string) *ynode {
+// buildYNode converts n and its subtree. yaml.v3 stops parsing at 10000
+// levels; the tighter maxTreeDepth keeps YAML in line with the other trees.
+func buildYNode(n *yaml.Node, key string, depth int) (*ynode, error) {
+	if depth > maxTreeDepth {
+		return nil, errTooDeep
+	}
 	switch n.Kind {
 	case yaml.DocumentNode:
 		if len(n.Content) == 0 {
-			return nil
+			return nil, nil
 		}
-		return buildYNode(n.Content[0], key)
+		return buildYNode(n.Content[0], key, depth)
 	case yaml.MappingNode:
 		yn := &ynode{kind: yMap, key: key}
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			k := yamlKey(n.Content[i])
-			yn.children = append(yn.children, buildYNode(n.Content[i+1], k))
+			child, err := buildYNode(n.Content[i+1], yamlKey(n.Content[i]), depth+1)
+			if err != nil {
+				return nil, err
+			}
+			yn.children = append(yn.children, child)
 		}
-		return yn
+		return yn, nil
 	case yaml.SequenceNode:
 		yn := &ynode{kind: ySeq, key: key}
 		for _, item := range n.Content {
-			yn.children = append(yn.children, buildYNode(item, ""))
+			child, err := buildYNode(item, "", depth+1)
+			if err != nil {
+				return nil, err
+			}
+			yn.children = append(yn.children, child)
 		}
-		return yn
+		return yn, nil
 	case yaml.AliasNode:
-		return &ynode{kind: yScalar, key: key, scalar: "*" + n.Value}
+		return &ynode{kind: yScalar, key: key, scalar: "*" + n.Value}, nil
 	default: // ScalarNode (and anything unexpected)
-		return &ynode{kind: yScalar, key: key, scalar: yamlScalar(n)}
+		return &ynode{kind: yScalar, key: key, scalar: yamlScalar(n)}, nil
 	}
 }
 
@@ -129,7 +141,7 @@ func renderYAMLTree(root *ynode, st styles, sel foldNode) string {
 }
 
 func renderYNode(n *ynode, depth int, inSeq bool, sel foldNode, st styles, out *[]string) {
-	indent := strings.Repeat("  ", depth)
+	indent := treeIndent(depth)
 	dash, dashPlain := "", ""
 	if inSeq {
 		dash, dashPlain = st.jsonPunct.Render("- "), "- "

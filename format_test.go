@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectFormat(t *testing.T) {
@@ -223,5 +226,108 @@ func TestSanitizingWriter(t *testing.T) {
 	}
 	if got, want := buf.String(), "hi \x1b[31mred\x1b[0m"; got != want {
 		t.Errorf("sanitizingWriter wrote %q, want %q", got, want)
+	}
+}
+
+// glamour's cost is exponential in blockquote depth and polynomial in list
+// depth: the first body below (96 bytes) took 5s and rendered 5.8 MB. Bodies
+// nested past maxMarkdownNesting, or over maxMarkdownBytes, now skip glamour
+// and render as their raw source.
+func TestRenderMarkdownTooDeepFallsBackToRaw(t *testing.T) {
+	var indented strings.Builder
+	for i := 0; i < 200; i++ {
+		indented.WriteString(strings.Repeat("  ", i) + "- x\n")
+	}
+	cases := map[string]string{
+		"nested blockquotes": "# t\n" + strings.Repeat(">", 90) + " x",
+		"spaced blockquotes": "# t\n" + strings.Repeat("> ", 90) + "x",
+		"inline list nest":   "# t\n" + strings.Repeat("- ", 400) + "x",
+		"indented list nest": "# t\n" + indented.String(),
+		"oversized":          "# t\n" + strings.Repeat("a", maxMarkdownBytes),
+	}
+	st := newStyles()
+	for name, body := range cases {
+		start := time.Now()
+		out := renderBody([]byte(body), "text/plain", "http://h/", st, true, true, 0)
+		if took := time.Since(start); took > time.Second {
+			t.Errorf("%s: render took %v", name, took)
+		}
+		if out != body {
+			t.Errorf("%s: want the raw body back, got %d bytes from %d", name, len(out), len(body))
+		}
+	}
+
+	// Ordinary nesting still goes through glamour.
+	body := "# Title\n\n- a\n    - b\n        - c\n\n> > quoted\n"
+	if out := renderBody([]byte(body), "text/markdown", "", st, true, true, 0); out == body {
+		t.Error("modestly nested markdown was not rendered")
+	}
+}
+
+func TestMarkdownTooDeep(t *testing.T) {
+	indented := func(levels int) string {
+		var b strings.Builder
+		for i := 0; i < levels; i++ {
+			b.WriteString(strings.Repeat("  ", i) + "- x\n")
+		}
+		return b.String()
+	}
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"prose", "# Title\n\nSome text > here.\n", false},
+		{"modest blockquotes", "> > > quoted\n", false},
+		{"4-space list indent", "- a\n    - b\n        - c\n            - d\n", false},
+		{"thematic breaks", "***\n---\n", false},
+		{"deep code, no markers", "```\n" + strings.Repeat(" ", 80) + "x\n```\n", false},
+		{"blockquotes at limit", strings.Repeat(">", maxMarkdownNesting) + " x", false},
+		{"blockquotes past limit", strings.Repeat(">", maxMarkdownNesting+1) + " x", true},
+		{"list indent at limit", indented(maxMarkdownNesting), false},
+		{"list indent past limit", indented(maxMarkdownNesting + 1), true},
+		{"bullet markers", strings.Repeat("* ", maxMarkdownNesting+1) + "x", true},
+		{"ordered markers", strings.Repeat("1. ", maxMarkdownNesting+1) + "x", true},
+		{"tab indent", ">" + strings.Repeat("\t", 8) + "- x", true},
+	}
+	for _, c := range cases {
+		if got := markdownTooDeep([]byte(c.body), maxMarkdownNesting); got != c.want {
+			t.Errorf("%s: markdownTooDeep = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Indentation repeats on every line, so a deeply nested body's pretty form
+// grows as lines × depth: this 14 KB of JSON once indented to 28 MB and the 21
+// KB of XML to 18 MB. Past prettyCap the flat render shows the body raw.
+func TestRenderBodyKeepsDeepBodiesRaw(t *testing.T) {
+	const depth, sibs = 2000, 5000
+	js := strings.Repeat("[", depth) + strings.TrimSuffix(strings.Repeat("1,", sibs), ",") + strings.Repeat("]", depth)
+	xb := `<?xml version="1.0"?>` + strings.Repeat("<a>", 3000) + strings.Repeat("</a>", 3000)
+	st := newStyles()
+	for _, c := range []struct{ ct, body string }{{"application/json", js}, {"application/xml", xb}} {
+		if out := renderBody([]byte(c.body), c.ct, "", st, false, true, 0); out != c.body {
+			t.Errorf("%s: want the raw body back, got %d bytes from %d", c.ct, len(out), len(c.body))
+		}
+	}
+}
+
+// prettyBody trusts jsonIndentFits to bound json.Indent before running it, so
+// the estimate must never come in under what Indent actually writes.
+func TestJSONIndentFitsNeverUndercounts(t *testing.T) {
+	for _, s := range []string{
+		`{"a":[1,{"b":null}],"c":{},"d":[]}`,
+		`[[[[1]]],[2,3]]`,
+		` { "s" : "a,b:{c}[d]\"e\\" , "t" : [ ] } `,
+		`"x"`,
+		`[]`,
+	} {
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, []byte(s), "", "  "); err != nil {
+			t.Fatalf("bad sample %q: %v", s, err)
+		}
+		if jsonIndentFits([]byte(s), buf.Len()-1) {
+			t.Errorf("jsonIndentFits(%q) undercounts: Indent wrote %d bytes", s, buf.Len())
+		}
 	}
 }

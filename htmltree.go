@@ -22,7 +22,11 @@ func parseHTMLTree(body []byte, contentType, url string, sniff bool) *xnode {
 	}
 	root := &xnode{kind: xElem}
 	for c := doc.FirstChild; c != nil; c = c.NextSibling {
-		if n := buildHTMLNode(c); n != nil {
+		n, err := buildHTMLNode(c, 0)
+		if err != nil {
+			return nil
+		}
+		if n != nil {
 			root.children = append(root.children, n)
 		}
 	}
@@ -32,7 +36,13 @@ func parseHTMLTree(body []byte, contentType, url string, sniff bool) *xnode {
 	return root
 }
 
-func buildHTMLNode(n *html.Node) *xnode {
+// buildHTMLNode converts n and its subtree; a nil node with a nil error means n
+// has nothing to show. html.Parse rejects nesting past 512 elements today, but
+// the depth check keeps this recursion bounded without relying on that.
+func buildHTMLNode(n *html.Node, depth int) (*xnode, error) {
+	if depth > maxTreeDepth {
+		return nil, errTooDeep
+	}
 	switch n.Type {
 	case html.ElementNode:
 		x := &xnode{kind: xElem, name: n.Data}
@@ -40,23 +50,27 @@ func buildHTMLNode(n *html.Node) *xnode {
 			x.attrs = append(x.attrs, xml.Attr{Name: xml.Name{Local: a.Key}, Value: a.Val})
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if cn := buildHTMLNode(c); cn != nil {
+			cn, err := buildHTMLNode(c, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			if cn != nil {
 				x.children = append(x.children, cn)
 			}
 		}
-		return x
+		return x, nil
 	case html.TextNode:
 		// HTML collapses runs of whitespace, so do the same for display — this
 		// also flattens multi-line <script>/<style>/<pre> text onto one line.
 		if s := strings.Join(strings.Fields(n.Data), " "); s != "" {
-			return &xnode{kind: xText, text: s}
+			return &xnode{kind: xText, text: s}, nil
 		}
-		return nil
+		return nil, nil
 	case html.CommentNode:
-		return &xnode{kind: xComment, text: strings.TrimSpace(n.Data)}
+		return &xnode{kind: xComment, text: strings.TrimSpace(n.Data)}, nil
 	case html.DoctypeNode:
-		return &xnode{kind: xDirective, text: "DOCTYPE " + n.Data}
+		return &xnode{kind: xDirective, text: "DOCTYPE " + n.Data}, nil
 	default:
-		return nil
+		return nil, nil
 	}
 }

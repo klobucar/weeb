@@ -54,6 +54,11 @@ func parseXMLTree(body []byte, contentType, url string, sniff bool) *xnode {
 		cur := stack[len(stack)-1]
 		switch t := tok.(type) {
 		case xml.StartElement:
+			// stack holds the synthetic root too, so this admits elements up
+			// to maxTreeDepth deep (encoding/xml itself never stops nesting).
+			if len(stack) > maxTreeDepth {
+				return nil
+			}
 			n := &xnode{kind: xElem, name: t.Name.Local, attrs: append([]xml.Attr(nil), t.Attr...)}
 			cur.children = append(cur.children, n)
 			stack = append(stack, n)
@@ -122,7 +127,7 @@ func renderXMLTree(root *xnode, st styles, sel foldNode) string {
 }
 
 func renderXNode(n *xnode, depth int, sel foldNode, st styles, out *[]string) {
-	indent := strings.Repeat("  ", depth)
+	indent := treeIndent(depth)
 
 	switch n.kind {
 	case xText:

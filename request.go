@@ -571,15 +571,59 @@ func splitHeaderSegments(s string) []string {
 
 // prettyBody pretty-prints the body when it looks like JSON, otherwise returns
 // it unchanged. This is for DISPLAY only — CLI stdout always emits the raw bytes
-// so downstream tools (jq, etc.) see exactly what the server sent.
+// so downstream tools (jq, etc.) see exactly what the server sent. A body whose
+// indented form would outgrow prettyCap is also returned unchanged.
 func prettyBody(body []byte, contentType string) string {
-	if isJSON(contentType) {
+	if isJSON(contentType) && jsonIndentFits(body, prettyCap(len(body))) {
 		var buf bytes.Buffer
 		if err := json.Indent(&buf, body, "", "  "); err == nil {
 			return buf.String()
 		}
 	}
 	return string(body)
+}
+
+// jsonIndentFits reports whether json.Indent(body, "", "  ") would produce at
+// most limit bytes, without producing it: json.Indent writes into a
+// bytes.Buffer and can't be stopped partway. It adds what Indent adds (a
+// newline plus the new depth's indentation after '{', '[', ',' and before '}',
+// ']'; a space after ':') to the body's length, so it never undercounts; it
+// overcounts empty containers and the source's own whitespace. It stops as
+// soon as the limit is passed.
+func jsonIndentFits(body []byte, limit int) bool {
+	n, depth := len(body), 0
+	inStr, esc := false, false
+	for _, c := range body {
+		if n > limit {
+			return false
+		}
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{', '[':
+			depth++
+			n += 1 + 2*depth
+		case ',':
+			n += 1 + 2*depth
+		case '}', ']':
+			depth = max(depth-1, 0)
+			n += 1 + 2*depth
+		case ':':
+			n++
+		}
+	}
+	return n <= limit
 }
 
 func isJSON(contentType string) bool {

@@ -39,7 +39,7 @@ func parseJSONTree(body []byte, contentType, url string, sniff bool) *bnode {
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
-	root, err := parseValue(dec, "", false)
+	root, err := parseValue(dec, "", false, 0)
 	if err != nil {
 		return nil
 	}
@@ -50,7 +50,10 @@ func parseJSONTree(body []byte, contentType, url string, sniff bool) *bnode {
 	return root
 }
 
-func parseValue(dec *json.Decoder, key string, hasKey bool) (*bnode, error) {
+func parseValue(dec *json.Decoder, key string, hasKey bool, depth int) (*bnode, error) {
+	if depth > maxTreeDepth {
+		return nil, errTooDeep
+	}
 	tok, err := dec.Token()
 	if err != nil {
 		return nil, err
@@ -68,7 +71,7 @@ func parseValue(dec *json.Decoder, key string, hasKey bool) (*bnode, error) {
 				if !ok {
 					return nil, fmt.Errorf("weeb: object key was not a string")
 				}
-				child, err := parseValue(dec, k, true)
+				child, err := parseValue(dec, k, true, depth+1)
 				if err != nil {
 					return nil, err
 				}
@@ -81,7 +84,7 @@ func parseValue(dec *json.Decoder, key string, hasKey bool) (*bnode, error) {
 		case '[':
 			n := &bnode{kind: bArray, key: key, hasKey: hasKey}
 			for dec.More() {
-				child, err := parseValue(dec, "", false)
+				child, err := parseValue(dec, "", false, depth+1)
 				if err != nil {
 					return nil, err
 				}
@@ -120,7 +123,7 @@ func renderTree(root *bnode, st styles, sel foldNode) string {
 // renderNode appends the rendered lines for n. isRoot suppresses folding/keys on
 // the top-level value (the Body section heading already collapses the whole body).
 func renderNode(n *bnode, depth int, last, isRoot bool, sel foldNode, st styles, out *[]string) {
-	indent := strings.Repeat("  ", depth)
+	indent := treeIndent(depth)
 	comma := ""
 	if !last {
 		comma = ","

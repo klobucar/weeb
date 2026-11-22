@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -196,6 +197,27 @@ func asFoldNodes[T foldNode](cs []T) []foldNode {
 	}
 	return out
 }
+
+// maxTreeDepth bounds how deeply a body may nest and still get a fold tree.
+// The builders recurse once per level, and encoding/json (before Go 1.27) and
+// encoding/xml enforce no depth cap of their own, so a few MB of "[[[[…" would
+// overflow the goroutine stack: a fatal crash that can't be recovered and
+// leaves the terminal in the alt screen. Past this the builders give up and
+// the body renders flat; the renderers and fold cursor recurse over the same
+// trees, so capping the builders bounds them too. Real documents nest a few
+// dozen levels at most.
+const maxTreeDepth = 1000
+
+var errTooDeep = errors.New("weeb: body nests too deeply for a fold tree")
+
+// maxIndentDepth caps how far the tree renderers indent. Each line repeats its
+// depth's indentation, so a deeply nested body renders as lines × depth bytes
+// (a 14 KB JSON body became 28 MB). Past this depth the indentation is
+// unreadable anyway, so lines stop shifting right and output stays linear.
+const maxIndentDepth = 32
+
+// treeIndent is the indentation for a tree line at depth.
+func treeIndent(depth int) string { return strings.Repeat("  ", min(depth, maxIndentDepth)) }
 
 // visibleNodes returns the foldable nodes in visual (pre-order) order, skipping
 // the root and anything hidden inside a collapsed ancestor. This is exactly the
