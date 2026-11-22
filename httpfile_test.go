@@ -576,16 +576,6 @@ https://x/health
 	}
 }
 
-// swapErrW redirects the stderr boundary writer into a buffer for the test.
-func swapErrW(t *testing.T) *strings.Builder {
-	t.Helper()
-	var buf strings.Builder
-	old := errW
-	errW = &buf
-	t.Cleanup(func() { errW = old })
-	return &buf
-}
-
 // captureFile points *f (os.Stdout or os.Stderr) at a temp file for the test
 // and returns a func that reads back what was written. A file, unlike a pipe,
 // can't fill up and block the writer.

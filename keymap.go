@@ -27,6 +27,11 @@ type keyMap struct {
 	FoldSection key.Binding
 	FoldAll     key.Binding
 	UnfoldAll   key.Binding
+
+	// Response-pane copy (OSC 52): the selected node's path, or its value.
+	// Plain letters like the fold keys, so also live only in that pane.
+	CopyPath  key.Binding
+	CopyValue key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -50,5 +55,8 @@ func defaultKeyMap() keyMap {
 		FoldSection: key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "fold section")),
 		FoldAll:     key.NewBinding(key.WithKeys("-", "_"), key.WithHelp("-", "fold all")),
 		UnfoldAll:   key.NewBinding(key.WithKeys("+", "="), key.WithHelp("+", "unfold all")),
+
+		CopyPath:  key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy path")),
+		CopyValue: key.NewBinding(key.WithKeys("Y", "shift+y"), key.WithHelp("Y", "copy value")),
 	}
 }
