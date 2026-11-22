@@ -115,7 +115,8 @@ func shellSafe(s string) bool {
 // headers, data, basic auth, user-agent/cookie/referer shortcuts — infers the
 // method (POST when there's a body, HEAD for -I), and silently ignores
 // transfer-only flags like -L/-k/--compressed that don't change the request.
-// -F/--form (multipart) is recognized but unsupported and errors with a hint.
+// -F/--form (multipart) is recognized but unsupported and errors with a hint,
+// as do flags that change where the request goes (see curlRouteErr).
 // Flags it does not recognize are an error: an unknown value-taking flag
 // would otherwise leave its value to be mistaken for the URL.
 func parseCurl(argv []string) (RequestSpec, error) {
@@ -143,9 +144,13 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		// Split an attached short-flag value, e.g. -XPOST or -H'K: V'.
 		flag, attached := arg, ""
 		if len(arg) > 2 && arg[0] == '-' && arg[1] != '-' {
-			if strings.ContainsRune("XHduAbeomF", rune(arg[1])) {
+			if strings.ContainsRune("XHduAbeomFxU", rune(arg[1])) {
 				flag, attached = arg[:2], arg[2:]
 			}
+		}
+
+		if err := curlRouteErr(flag); err != nil {
+			return spec, err
 		}
 
 		switch flag {
@@ -249,9 +254,8 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		// Flags that take a value we don't use — consume and drop it.
 		case "-o", "--output", "-m", "--max-time", "--connect-timeout", "--retry",
 			"-w", "--write-out", "-c", "--cookie-jar", "-T", "--upload-file",
-			"-E", "--cert", "--cacert", "--key", "--proxy", "-x",
-			"--max-redirs", "--retry-delay", "--retry-max-time", "--resolve",
-			"--limit-rate", "--connect-to":
+			"-E", "--cert", "--cacert", "--key",
+			"--max-redirs", "--retry-delay", "--retry-max-time", "--limit-rate":
 			if _, err := take(&i, flag, attached); err != nil {
 				return spec, err
 			}
@@ -319,6 +323,28 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		}
 	}
 	return spec, nil
+}
+
+// curlRouteErr refuses curl flags that send the request somewhere other than
+// the URL's host (through a proxy, to a pinned address, via other resolvers,
+// out a chosen interface or socket) and returns nil for any other flag. weeb
+// can't honor them, and ignoring one would quietly send the request, auth
+// headers and all, direct from the user's own IP or to wherever DNS points.
+// Prefixes cover each family (--proxy-header, --socks5-gssapi, --dns-*, ...).
+func curlRouteErr(flag string) error {
+	// Name the flag, never its value: --proxy=URL can carry credentials.
+	name, _, _ := strings.Cut(flag, "=")
+	switch {
+	case name == "-x", name == "-U", name == "-p", name == "--preproxy", name == "--noproxy",
+		strings.HasPrefix(name, "--proxy"), strings.HasPrefix(name, "--socks"):
+		// The transports use http.ProxyFromEnvironment (socks5h:// included).
+		return fmt.Errorf("curl: %s (proxy) isn't supported, so the request was not sent — set HTTPS_PROXY/HTTP_PROXY/NO_PROXY in the environment instead, which weeb honors", name)
+	case name == "--resolve", name == "--connect-to", name == "--interface",
+		name == "--unix-socket", name == "--abstract-unix-socket",
+		strings.HasPrefix(name, "--dns-"), strings.HasPrefix(name, "--doh-"):
+		return fmt.Errorf("curl: %s isn't supported, so the request was not sent — it changes where curl connects, which weeb can't reproduce", name)
+	}
+	return nil
 }
 
 // urlencodeDataItem resolves one --data-urlencode value the way curl does:

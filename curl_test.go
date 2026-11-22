@@ -1,10 +1,13 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -213,6 +216,79 @@ func TestParseCurlFormUnsupported(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "multipart") || !strings.Contains(err.Error(), "--data") {
 			t.Errorf("parseCurl(%v) err = %v, want the multipart/--data hint", argv, err)
 		}
+	}
+}
+
+// Flags that change where the request goes must be refused, not ignored: a
+// pasted `curl -x socks5h://127.0.0.1:9050 …` (Tor) or corporate-proxy command
+// used to go direct from the user's own IP, auth header and all, and an
+// ignored --resolve/--connect-to sent it wherever DNS pointed.
+func TestParseCurlRejectsRoutingFlags(t *testing.T) {
+	cases := []struct {
+		flag string // as the error must name it
+		argv []string
+	}{
+		{"-x", []string{"curl", "-x", "socks5h://127.0.0.1:9050", "https://x"}},
+		{"-x", []string{"curl", "-xproxy:8080", "https://x"}},
+		{"--proxy", []string{"curl", "https://x", "--proxy", "http://proxy:8080"}},
+		{"--proxy", []string{"curl", "--proxy=http://u:hunter2@proxy:8080", "https://x"}},
+		{"-U", []string{"curl", "-U", "u:hunter2", "https://x"}},
+		{"-U", []string{"curl", "-Uu:hunter2", "https://x"}},
+		{"--proxy-user", []string{"curl", "--proxy-user", "u:hunter2", "https://x"}},
+		{"--proxy-header", []string{"curl", "--proxy-header", "X-A: b", "https://x"}},
+		{"-p", []string{"curl", "-p", "https://x"}},
+		{"--proxytunnel", []string{"curl", "--proxytunnel", "https://x"}},
+		{"--preproxy", []string{"curl", "--preproxy", "socks5://p:1080", "https://x"}},
+		{"--noproxy", []string{"curl", "--noproxy", "*", "https://x"}},
+		{"--socks4", []string{"curl", "--socks4", "p:1080", "https://x"}},
+		{"--socks4a", []string{"curl", "--socks4a", "p:1080", "https://x"}},
+		{"--socks5", []string{"curl", "--socks5", "p:1080", "https://x"}},
+		{"--socks5-hostname", []string{"curl", "--socks5-hostname", "p:1080", "https://x"}},
+		{"--resolve", []string{"curl", "--resolve", "x:443:127.0.0.1", "https://x"}},
+		{"--connect-to", []string{"curl", "--connect-to", "x:443:other:443", "https://x"}},
+		{"--interface", []string{"curl", "--interface", "tun0", "https://x"}},
+		{"--dns-servers", []string{"curl", "--dns-servers", "1.1.1.1", "https://x"}},
+		{"--doh-url", []string{"curl", "--doh-url", "https://doh.example/q", "https://x"}},
+		{"--unix-socket", []string{"curl", "--unix-socket", "/run/docker.sock", "http://x"}},
+		{"--abstract-unix-socket", []string{"curl", "--abstract-unix-socket", "s", "http://x"}},
+	}
+	for _, tc := range cases {
+		_, err := parseCurl(tc.argv)
+		if err == nil {
+			t.Errorf("parseCurl(%q) accepted %s; it must refuse instead of sending elsewhere", tc.argv, tc.flag)
+			continue
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "curl: "+tc.flag+" ") || !strings.Contains(msg, "not sent") {
+			t.Errorf("parseCurl(%q) err = %q, want %s named and \"not sent\"", tc.argv, msg, tc.flag)
+		}
+		if strings.Contains(msg, "hunter2") {
+			t.Errorf("parseCurl(%q) err echoes the flag's credentials: %q", tc.argv, msg)
+		}
+	}
+
+	// Proxy refusals point at what weeb's transport does honor.
+	if _, err := parseCurl([]string{"curl", "-x", "http://p:8080", "https://x"}); err == nil || !strings.Contains(err.Error(), "HTTPS_PROXY") {
+		t.Errorf("-x err = %v, want the HTTPS_PROXY hint", err)
+	}
+
+	// Harmless transfer flags are still ignored.
+	if s, err := parseCurl([]string{"curl", "-4", "--ipv6", "-sL", "--compressed", "https://x"}); err != nil || s.URL != "https://x" {
+		t.Errorf("transfer flags: url = %q, err = %v, want https://x", s.URL, err)
+	}
+
+	// End to end: `weeb curl` with -x exits 2 and nothing reaches either host.
+	var proxyHits, directHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { proxyHits.Add(1) }))
+	defer proxy.Close()
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { directHits.Add(1) }))
+	defer target.Close()
+	cmd := "curl -x " + proxy.URL + " -H 'Authorization: Bearer s3cret' " + target.URL
+	if code := runCurlImport([]string{cmd}); code != 2 {
+		t.Errorf("weeb curl %q exit = %d, want 2", cmd, code)
+	}
+	if proxyHits.Load() != 0 || directHits.Load() != 0 {
+		t.Errorf("request was sent: proxy hits = %d, direct hits = %d", proxyHits.Load(), directHits.Load())
 	}
 }
 

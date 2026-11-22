@@ -151,7 +151,11 @@ weeb curl 'curl -X POST https://api.example.com/u -H "Accept: application/json" 
 
 It handles whatever "Copy as cURL" produces: `-u` basic auth, `@file` bodies, and
 method inference (POST when there's a body, HEAD for `-I`). Transfer-only flags
-like `-L`, `-k`, and `--compressed` are ignored.
+like `-L`, `-k`, and `--compressed` are ignored. Flags that change where the
+request goes (`-x`/`--proxy` and the other proxy and SOCKS flags, `--resolve`,
+`--connect-to`, `--interface`, `--unix-socket`, `--dns-*`/`--doh-*`) are
+refused and nothing is sent; to use a proxy, set `HTTPS_PROXY`/`HTTP_PROXY`
+(and `NO_PROXY`), which weeb honors.
 
 Going the other way, turn the request you just built into a shareable command:
 
