@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	log "charm.land/log/v2"
@@ -115,6 +116,21 @@ type RequestSpec struct {
 	// (status, Location header, body) instead of whatever it points at.
 	NoFollow bool
 
+	// TLS carries -k, --cacert and --cert/--key; the zero value verifies
+	// against the system roots, as before.
+	TLS TLSOptions
+
+	// Form, when set, is a multipart/form-data body (-F) that takes the place
+	// of Body. Upload files are read when the request is sent.
+	Form []FormField
+
+	// CookieFile (-b FILE) seeds a cookie jar from a Netscape cookie file and
+	// CookieJar (--cookie-jar FILE, curl's -c) receives the jar's cookies
+	// afterwards. Either one turns the jar on for the request, every
+	// redirect hop included.
+	CookieFile string
+	CookieJar  string
+
 	// envHeaderKeys holds the lowercased names of the headers that came from
 	// the environment (WEEB_HEADERS, WEEB_TOKEN) — injected by resolveSpec,
 	// or, for the TUI form, rows still holding their env prefill — so
@@ -175,6 +191,11 @@ type Client struct {
 	// value is a total cap, so Do keeps it on streamed transfers too; only
 	// the DEFAULT timeout steps aside for a BodySink.
 	explicitTimeout bool
+
+	// transports caches one transport per TLSOptions (see tlsTransport); the
+	// TUI sends from a goroutine, hence the lock.
+	trMu       sync.Mutex
+	transports map[tlsTransportKey]*http.Transport
 }
 
 func newClient(logger *log.Logger, voice ErrorChan) *Client {
@@ -300,9 +321,18 @@ func effectivePort(u *url.URL) string {
 // structured diagnostic line, and on failure the ErrorChan produces the human
 // display string. No other code logs request-lifecycle events or formats a
 // failure for display.
-func (c *Client) Do(spec RequestSpec) Result {
+//
+// res is named so the deferred cookie-jar write can still report a failure.
+func (c *Client) Do(spec RequestSpec) (res Result) {
 	spec = resolveSpec(spec)
-	res := Result{Method: strings.ToUpper(strings.TrimSpace(spec.Method)), URL: spec.URL}
+	res = Result{Method: strings.ToUpper(strings.TrimSpace(spec.Method)), URL: spec.URL}
+
+	// -F parts become the body here, before the request is built, so history
+	// records the bytes actually sent.
+	spec, err := materializeForm(spec)
+	if err != nil {
+		return c.badRequest(res, err)
+	}
 
 	req, err := buildRequest(spec)
 	if err != nil {
@@ -323,21 +353,45 @@ func (c *Client) Do(spec RequestSpec) Result {
 	if spec.NoFollow {
 		ctx = context.WithValue(ctx, noFollowKey{}, true)
 	}
+
+	// A cookie jar (-b FILE / --cookie-jar) and TLS options each need their
+	// own http.Client; both are settled before anything counts as sent.
+	var jar *cookieSession
+	if spec.CookieFile != "" || spec.CookieJar != "" {
+		if jar, err = newCookieSession(spec.CookieFile); err != nil {
+			return c.badRequest(res, err)
+		}
+	}
+	httpc, err := c.httpClientFor(spec, jar)
+	if err != nil {
+		return c.badRequest(res, err)
+	}
+
 	// History is recorded after the fact: deferred here — past the build
 	// errors, so only requests that were actually attempted leave an entry —
 	// and the closure sees the final res (status, duration) on every return
 	// path below. Best-effort by construction; recordHistory never fails Do.
 	defer func() { c.recordHistory(spec, res) }()
+	// The jar is written whatever happened (curl writes it even on failure:
+	// a redirect hop may have set cookies), and a failed write fails the run.
+	if jar != nil && spec.CookieJar != "" {
+		defer func() {
+			if err := jar.save(spec.CookieJar); err != nil {
+				err = fmt.Errorf("writing cookie jar: %w", err)
+				c.log.Error("cookie jar write failed", "err", err)
+				if res.Err == nil {
+					res.Err = err
+				}
+				if res.DisplayErr != "" {
+					res.DisplayErr += "\n"
+				}
+				res.DisplayErr += c.voice.Render(KindBadRequest, 0, err)
+			}
+		}()
+	}
 
 	tr := &reqTrace{}
 	req = req.WithContext(httptrace.WithClientTrace(ctx, tr.clientTrace()))
-
-	// Streaming with the default timeout: bound the wait for headers, never
-	// the body copy. An explicit --timeout keeps the total cap even here.
-	httpc := c.http
-	if spec.BodySink != nil && !c.explicitTimeout {
-		httpc = c.stream
-	}
 
 	start := time.Now()
 	tr.start = start
@@ -413,6 +467,15 @@ func (c *Client) Do(spec RequestSpec) Result {
 		res.Err = statusErr
 		res.DisplayErr = c.voice.Render(KindHTTPStatus, resp.StatusCode, statusErr)
 	}
+	return res
+}
+
+// badRequest fails res as a request that couldn't be built — before anything
+// was sent — through both seams.
+func (c *Client) badRequest(res Result, err error) Result {
+	c.log.Error("request failed", "kind", KindBadRequest.String(), "err", err)
+	res.Err = err
+	res.DisplayErr = c.voice.Render(KindBadRequest, 0, err)
 	return res
 }
 

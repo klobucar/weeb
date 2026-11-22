@@ -21,6 +21,8 @@ var (
 		"-v", "--stats", "--pretty", "--raw", "--no-tui", "--headless",
 		"-q", "--quiet", "--persona", "--to-curl", "-o", "--output",
 		"--max-body", "-h", "--help",
+		"-k", "--insecure", "--cacert", "-E", "--cert", "--key",
+		"-F", "--form", "--form-string", "-b", "--cookie", "--cookie-jar",
 	}
 	// Flags accepted after `weeb cert` (see runCert).
 	completionCertFlags = []string{
@@ -71,6 +73,7 @@ _weeb() {
     --persona) compadd -a personas; return ;;
     -X|--request) compadd -a methods; return ;;
     -o|--output|-d|--data|--client-cert|--cert|--client-key|--key) _files; return ;;
+    --cacert|-E|-b|--cookie|--cookie-jar) _files; return ;;
   esac
 
   # First word: a subcommand, a method, or straight to flags/URL.
@@ -118,6 +121,8 @@ _weeb() {
     --persona) COMPREPLY=($(compgen -W "$personas" -- "$cur")); return ;;
     -X|--request) COMPREPLY=($(compgen -W "$methods" -- "$cur")); return ;;
     -o|--output|-d|--data|--client-cert|--cert|--client-key|--key)
+      COMPREPLY=($(compgen -f -- "$cur")); return ;;
+    --cacert|-E|-b|--cookie|--cookie-jar)
       COMPREPLY=($(compgen -f -- "$cur")); return ;;
   esac
 

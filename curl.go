@@ -32,13 +32,25 @@ func toCurl(spec RequestSpec, multiline bool) string {
 	head += " " + shellQuote(spec.URL)
 
 	segs := []string{head}
+	for _, o := range curlOptionArgs(spec) {
+		if o[1] == "" {
+			segs = append(segs, o[0])
+		} else {
+			segs = append(segs, o[0]+" "+shellQuote(o[1]))
+		}
+	}
 	for _, h := range spec.Headers {
 		if strings.TrimSpace(h.Key) == "" {
 			continue
 		}
 		segs = append(segs, "-H "+shellQuote(curlHeaderArg(h)))
 	}
-	if len(spec.Body) > 0 && methodAllowsBody(method) {
+	if len(spec.Form) > 0 && methodAllowsBody(method) {
+		for _, f := range spec.Form {
+			flag, arg := curlFormArg(f)
+			segs = append(segs, flag+" "+shellQuote(arg))
+		}
+	} else if len(spec.Body) > 0 && methodAllowsBody(method) {
 		// --data-raw, not --data: curl treats a leading @ in --data as a file
 		// to upload, which would turn a literal body into a file read.
 		segs = append(segs, "--data-raw "+shellQuote(string(spec.Body)))
@@ -75,13 +87,29 @@ func renderCurl(spec RequestSpec, st styles, color, multiline bool) string {
 	head += " " + lipgloss.NewStyle().Foreground(cBlue).Render(shellQuote(spec.URL))
 
 	segs := []string{head}
+	for _, o := range curlOptionArgs(spec) {
+		switch {
+		case o[0] == "-k":
+			// Red, like the TUI's INSECURE badge: easy to spot before pasting.
+			segs = append(segs, lipgloss.NewStyle().Bold(true).Foreground(cRed).Render(o[0]))
+		case o[1] == "":
+			segs = append(segs, flag(o[0]))
+		default:
+			segs = append(segs, flag(o[0])+" "+str(shellQuote(o[1])))
+		}
+	}
 	for _, h := range spec.Headers {
 		if strings.TrimSpace(h.Key) == "" {
 			continue
 		}
 		segs = append(segs, flag("-H")+" "+str(shellQuote(curlHeaderArg(h))))
 	}
-	if len(spec.Body) > 0 && methodAllowsBody(method) {
+	if len(spec.Form) > 0 && methodAllowsBody(method) {
+		for _, f := range spec.Form {
+			fl, arg := curlFormArg(f)
+			segs = append(segs, flag(fl)+" "+str(shellQuote(arg)))
+		}
+	} else if len(spec.Body) > 0 && methodAllowsBody(method) {
 		segs = append(segs, flag("--data-raw")+" "+str(shellQuote(string(spec.Body))))
 	}
 
@@ -90,6 +118,27 @@ func renderCurl(spec RequestSpec, st styles, color, multiline bool) string {
 		sep = " \\\n  "
 	}
 	return strings.Join(segs, sep)
+}
+
+// curlOptionArgs are the curl flags for a spec's TLS and cookie-file settings
+// as (flag, value) pairs, in a fixed order; the value is "" for -k. --cert is
+// escaped because curl reads an unescaped colon in it as FILE:PASSWORD.
+func curlOptionArgs(spec RequestSpec) [][2]string {
+	var out [][2]string
+	add := func(flag, v string) {
+		if v != "" {
+			out = append(out, [2]string{flag, v})
+		}
+	}
+	if spec.TLS.Insecure {
+		out = append(out, [2]string{"-k", ""})
+	}
+	add("--cacert", spec.TLS.CACert)
+	add("--cert", certArgEscape(spec.TLS.Cert))
+	add("--key", spec.TLS.Key)
+	add("-b", spec.CookieFile)
+	add("-c", spec.CookieJar)
+	return out
 }
 
 // curlHeaderArg renders a header as a -H value. curl reads "Name:" with
@@ -130,13 +179,13 @@ func shellSafe(s string) bool {
 
 // parseCurl turns a tokenized curl command (with or without a leading "curl")
 // into a RequestSpec. It understands the flags people actually paste — method,
-// headers, data, basic auth, user-agent/cookie/referer shortcuts — infers the
-// method (POST when there's a body, HEAD for -I), and silently ignores
-// transfer-only flags like -L/-k/--compressed that don't change the request.
-// -F/--form (multipart) is recognized but unsupported and errors with a hint,
-// as do flags that change where the request goes (see curlRouteErr).
-// Flags it does not recognize are an error: an unknown value-taking flag
-// would otherwise leave its value to be mistaken for the URL.
+// headers, data, -F multipart forms, basic auth, user-agent/cookie/referer
+// shortcuts, TLS (-k, --cacert, -E/--cert, --key) and cookie files (-b FILE,
+// -c FILE) — infers the method (POST when there's a body, HEAD for -I), and
+// silently ignores transfer-only flags like -L/--compressed that don't change
+// the request. Flags that change where the request goes are refused (see
+// curlRouteErr). Flags it does not recognize are an error: an unknown
+// value-taking flag would otherwise leave its value to be mistaken for the URL.
 func parseCurl(argv []string) (RequestSpec, error) {
 	var spec RequestSpec
 	var data []string
@@ -162,7 +211,7 @@ func parseCurl(argv []string) (RequestSpec, error) {
 		// Split an attached short-flag value, e.g. -XPOST or -H'K: V'.
 		flag, attached := arg, ""
 		if len(arg) > 2 && arg[0] == '-' && arg[1] != '-' {
-			if strings.ContainsRune("XHduAbeomFxU", rune(arg[1])) {
+			if strings.ContainsRune("XHduAbeomFxUcE", rune(arg[1])) {
 				flag, attached = arg[:2], arg[2:]
 			}
 		}
@@ -223,10 +272,62 @@ func parseCurl(argv []string) (RequestSpec, error) {
 			data = append(data, v)
 
 		case "-F", "--form", "--form-string":
-			// Recognized but not convertible: multipart bodies have no
-			// RequestSpec shape. Error immediately so the flag's value
-			// isn't mistaken for the URL.
-			return spec, fmt.Errorf("curl: -F/--form (multipart) isn't supported yet — convert the request to a raw --data body if you can")
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			f, err := parseFormArg(v, flag == "--form-string")
+			if err != nil {
+				return spec, fmt.Errorf("curl: %w", err)
+			}
+			spec.Form = append(spec.Form, f)
+
+		case "-k", "--insecure":
+			spec.TLS.Insecure = true
+
+		case "--cacert":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			spec.TLS.CACert = v
+
+		case "-E", "--cert":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			if spec.TLS.Cert, err = parseCertArg(v); err != nil {
+				return spec, fmt.Errorf("curl: %w", err)
+			}
+
+		case "--key":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			spec.TLS.Key = v
+
+		case "--cert-type", "--key-type":
+			// PEM is the default and all weeb reads; anything else would be
+			// misread, so it's refused rather than dropped.
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			if !strings.EqualFold(v, "PEM") {
+				return spec, fmt.Errorf("curl: %s %q isn't supported; weeb reads PEM only", flag, v)
+			}
+
+		case "-c", "--cookie-jar":
+			v, err := take(&i, flag, attached)
+			if err != nil {
+				return spec, err
+			}
+			if err := checkCookieJarArg(v); err != nil {
+				return spec, fmt.Errorf("curl: %w", err)
+			}
+			spec.CookieJar = v
 
 		case "-u", "--user":
 			v, err := take(&i, flag, attached)
@@ -248,7 +349,16 @@ func parseCurl(argv []string) (RequestSpec, error) {
 			if err != nil {
 				return spec, err
 			}
-			spec.Headers = append(spec.Headers, Header{Key: "Cookie", Value: v})
+			header, file, err := parseCookieArg(v)
+			if err != nil {
+				return spec, fmt.Errorf("curl: %w", err)
+			}
+			if header != "" {
+				spec.Headers = append(spec.Headers, Header{Key: "Cookie", Value: header})
+			}
+			if file != "" {
+				spec.CookieFile = file
+			}
 
 		case "-e", "--referer":
 			v, err := take(&i, flag, attached)
@@ -271,15 +381,14 @@ func parseCurl(argv []string) (RequestSpec, error) {
 
 		// Flags that take a value we don't use — consume and drop it.
 		case "-o", "--output", "-m", "--max-time", "--connect-timeout", "--retry",
-			"-w", "--write-out", "-c", "--cookie-jar", "-T", "--upload-file",
-			"-E", "--cert", "--cacert", "--key",
+			"-w", "--write-out", "-T", "--upload-file",
 			"--max-redirs", "--retry-delay", "--retry-max-time", "--limit-rate":
 			if _, err := take(&i, flag, attached); err != nil {
 				return spec, err
 			}
 
 		// Boolean transfer-only flags: they shape the transfer, not the request.
-		case "-L", "--location", "--location-trusted", "-k", "--insecure",
+		case "-L", "--location", "--location-trusted",
 			"--compressed", "-s", "--silent", "-S", "--show-error",
 			"-v", "--verbose", "-f", "--fail", "-i", "--include",
 			"-N", "--no-buffer", "-#", "--progress-bar", "-g", "--globoff",
@@ -300,6 +409,8 @@ func parseCurl(argv []string) (RequestSpec, error) {
 							headOnly = true
 						case 'G':
 							forceGet = true
+						case 'k':
+							spec.TLS.Insecure = true
 						}
 					}
 					continue
@@ -314,6 +425,10 @@ func parseCurl(argv []string) (RequestSpec, error) {
 
 	if strings.TrimSpace(spec.URL) == "" {
 		return spec, fmt.Errorf("curl: no URL found in command")
+	}
+	if len(spec.Form) > 0 && (len(data) > 0 || forceGet || headOnly) {
+		// curl refuses these too ("only one HTTP request method").
+		return spec, fmt.Errorf("curl: -F (multipart) can't be combined with -d, -G or -I")
 	}
 	if len(data) > 0 {
 		joined := strings.Join(data, "&")
@@ -334,7 +449,7 @@ func parseCurl(argv []string) (RequestSpec, error) {
 			spec.Method = "HEAD"
 		case forceGet:
 			spec.Method = "GET"
-		case len(data) > 0:
+		case len(data) > 0, len(spec.Form) > 0:
 			spec.Method = "POST"
 		default:
 			spec.Method = "GET"
@@ -415,7 +530,7 @@ func curlEscape(s string) string {
 
 // isShortBoolCluster reports whether every letter in a clustered short flag
 // ("sSL" from "-sSL") is a boolean flag we understand: transfer-only ones we
-// ignore plus -I/-G, which set the method.
+// ignore plus -I/-G, which set the method, and -k.
 func isShortBoolCluster(s string) bool {
 	if s == "" {
 		return false

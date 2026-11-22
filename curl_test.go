@@ -205,18 +205,35 @@ func TestParseCurlDataFileNewlines(t *testing.T) {
 	}
 }
 
-// -F/--form gets a dedicated error pointing at --data instead of the generic
-// "unsupported flag", and errors immediately so its value can't be mistaken
-// for the URL.
-func TestParseCurlFormUnsupported(t *testing.T) {
+// -F/--form/--form-string import as multipart parts and imply POST; the value
+// is consumed, never mistaken for the URL.
+func TestParseCurlForm(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want FormField
+	}{
+		{[]string{"curl", "-F", "a=b", "https://x"}, FormField{Name: "a", Value: "b"}},
+		{[]string{"curl", "--form", "a=@f.txt;type=text/plain", "https://x"}, FormField{Name: "a", Value: "f.txt", Kind: formFile, Type: "text/plain"}},
+		{[]string{"curl", "--form-string", "a=@f;x", "https://x"}, FormField{Name: "a", Value: "@f;x"}},
+		{[]string{"curl", "-Fa=<n.txt", "https://x"}, FormField{Name: "a", Value: "n.txt", Kind: formFileText}},
+	}
+	for _, c := range cases {
+		s, err := parseCurl(c.argv)
+		if err != nil {
+			t.Fatalf("parseCurl(%v): %v", c.argv, err)
+		}
+		if s.URL != "https://x" || s.Method != "POST" || len(s.Form) != 1 || s.Form[0] != c.want {
+			t.Errorf("parseCurl(%v) = %s %s %+v, want POST https://x %+v", c.argv, s.Method, s.URL, s.Form, c.want)
+		}
+	}
+	// One body per request, as in curl.
 	for _, argv := range [][]string{
-		{"curl", "-F", "a=b", "https://x"},
-		{"curl", "--form", "a=b", "https://x"},
-		{"curl", "--form-string", "a=b", "https://x"},
+		{"curl", "-F", "a=b", "-d", "c=d", "https://x"},
+		{"curl", "-G", "-F", "a=b", "https://x"},
+		{"curl", "-I", "-F", "a=b", "https://x"},
 	} {
-		_, err := parseCurl(argv)
-		if err == nil || !strings.Contains(err.Error(), "multipart") || !strings.Contains(err.Error(), "--data") {
-			t.Errorf("parseCurl(%v) err = %v, want the multipart/--data hint", argv, err)
+		if _, err := parseCurl(argv); err == nil {
+			t.Errorf("parseCurl(%v) should refuse -F with -d/-G/-I", argv)
 		}
 	}
 }

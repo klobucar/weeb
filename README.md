@@ -110,12 +110,27 @@ In headless mode the response **body** goes to stdout; weeb's errors, logs, and
 | `--to-curl` | Print the `curl` equivalent instead of sending |
 | `-o, --output FILE` | Stream the response body to a file, uncapped — like `curl -o` (implies headless) |
 | `--max-body SIZE` | Cap for bodies weeb buffers to render, e.g. `256m` (default `64m`, `0` = no cap; piped/`-o` bodies are never capped) |
+| `-k, --insecure` | Skip TLS certificate verification. Never silent: a warning on stderr, and a red `INSECURE` badge in the TUI |
+| `--cacert FILE` | Trust the CAs in this PEM file *instead of* the system roots, like curl |
+| `-E, --cert FILE` | Client certificate (PEM) for mTLS; the key may be in the same file. curl's `FILE:PASSWORD` isn't supported |
+| `--key FILE` | The client certificate's private key (PEM), when it's a separate file |
+| `-F, --form NAME=…` | Multipart form part (repeatable, implies POST): `name=value`, `name=@file[;type=mime][;filename=x]`, `name=<file`. `--form-string` sends the value as-is |
+| `-b, --cookie DATA` | Send cookies `'a=1; b=2'`, or (no `=`) load a Netscape cookie file into a cookie jar |
+| `--cookie-jar FILE` | Write the jar's cookies to FILE afterwards, Netscape format, mode 0600 (curl's `-c`; weeb's `-c` is `--crit`) |
 | `-h, --help` | Show help |
 
 `METHOD` is optional and defaults to `GET`. A URL with no scheme defaults to
 `http://` (port 80), so `weeb GET example.com:8080/health` just works — only
 `weeb cert` defaults to `https`/443. Color and pretty-printing apply only at a
 terminal; piped output is always the raw server bytes.
+
+The TLS and cookie flags follow curl. `--cacert` *replaces* the system trust
+store rather than adding to it, so the server must chain to a CA in that file.
+`-b jar.txt --cookie-jar jar.txt` keeps a session across runs: cookies set
+anywhere along a redirect chain are recorded, and jar cookies go only where
+their domain and path allow (with the public suffix list), while a typed
+`-b 'a=1'` is dropped on a cross-origin redirect like any credential. A
+missing `-b` file is fine on the first run.
 
 ## Pretty, raw & folding
 
@@ -150,8 +165,11 @@ weeb curl 'curl -X POST https://api.example.com/u -H "Accept: application/json" 
 ```
 
 It handles whatever "Copy as cURL" produces: `-u` basic auth, `@file` bodies, and
-method inference (POST when there's a body, HEAD for `-I`). Transfer-only flags
-like `-L`, `-k`, and `--compressed` are ignored. Flags that change where the
+method inference (POST when there's a body, HEAD for `-I`). It also honors
+`-F`/`--form` multipart bodies, TLS options (`-k`, `--cacert`, `-E`/`--cert`,
+`--key`) and cookies (`-b 'a=1'`, `-b FILE`, `-c FILE`); a pasted `-k` prints
+the same stderr warning as weeb's own. Transfer-only flags
+like `-L` and `--compressed` are ignored. Flags that change where the
 request goes (`-x`/`--proxy` and the other proxy and SOCKS flags, `--resolve`,
 `--connect-to`, `--interface`, `--unix-socket`, `--dns-*`/`--doh-*`) are
 refused and nothing is sent; to use a proxy, set `HTTPS_PROXY`/`HTTP_PROXY`

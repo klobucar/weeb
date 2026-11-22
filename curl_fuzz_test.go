@@ -23,6 +23,8 @@ func FuzzCurlRoundTrip(f *testing.F) {
 		`curl -u alice:secret -G -d q=1 https://x/search`,
 		`curl -X 'GET;id' https://x`,
 		`curl -H 'X-A: it'\''s' https://x --data-raw $'a'`,
+		`curl -sSLk --cacert ca.pem -E 'c\:1.pem' --key k.pem -b jar.txt -c out.txt https://x`,
+		`curl -F a=b -F 'f=<x.txt;type=text/plain' -F 'g="a;b";filename=" n"' --form-string 'h=<lit' https://x`,
 	} {
 		f.Add(s)
 	}
@@ -117,6 +119,15 @@ func specDiff(a, b RequestSpec) string {
 	}
 	if methodAllowsBody(ma) && string(a.Body) != string(b.Body) {
 		return "body"
+	}
+	if methodAllowsBody(ma) && !slices.Equal(a.Form, b.Form) {
+		return "form"
+	}
+	if a.TLS != b.TLS {
+		return "tls"
+	}
+	if a.CookieFile != b.CookieFile || a.CookieJar != b.CookieJar {
+		return "cookie files"
 	}
 	return ""
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -140,6 +139,12 @@ func runTUI(seed *cliArgs) int {
 		fmt.Fprintln(os.Stderr, "weeb:", err)
 		return 2
 	}
+	if seed != nil {
+		if err := preflightSpec(RequestSpec{TLS: seed.tls, Form: seed.form}); err != nil {
+			fmt.Fprintln(os.Stderr, "weeb:", err)
+			return 2
+		}
+	}
 
 	client := newClient(logger, voice)
 	if seed != nil && seed.timeout > 0 {
@@ -181,6 +186,12 @@ type cliArgs struct {
 	maxBody  string // --max-body: buffered-body cap, e.g. "256m" (overrides WEEB_MAX_BODY)
 	noFollow bool   // --no-follow: don't follow redirects, show the 3xx itself
 
+	// curl-parity request options (see tlsopts.go, form.go, cookies.go).
+	tls        TLSOptions  // -k, --cacert, -E/--cert, --key
+	form       []FormField // -F/--form, --form-string: multipart body
+	cookieFile string      // -b FILE: Netscape cookie file to load
+	cookieJar  string      // --cookie-jar FILE: write cookies here after
+
 	// Monitoring-plugin mode (see check.go). check replaces the whole output
 	// matrix with one plugin line + a 0/1/2/3 exit; the others only apply with it.
 	check        bool
@@ -213,6 +224,7 @@ func (a cliArgs) prettyOn() bool {
 // receives the exact raw bytes the server sent (`weeb ... | jq` stays clean).
 func runCLI(a cliArgs) int {
 	spec := RequestSpec{Method: a.method, URL: a.url, Headers: a.headers, Body: a.body, NoFollow: a.noFollow}
+	spec.TLS, spec.Form, spec.CookieFile, spec.CookieJar = a.tls, a.form, a.cookieFile, a.cookieJar
 
 	// --to-curl: export the request (with env prefills resolved, so it's a
 	// faithful reproduction of what weeb would send) instead of sending it.
@@ -247,6 +259,17 @@ func runCLI(a cliArgs) int {
 		fmt.Fprintln(os.Stderr, "weeb: --expect-status/--expect-body/-w/-c/--json only apply with --check")
 		return 2
 	}
+
+	// Unreadable TLS material or -F files are usage errors, caught before
+	// anything is sent (UNKNOWN in plugin mode, like the errors above).
+	if err := preflightSpec(spec); err != nil {
+		if a.check {
+			return printCheck(outW, newCheckVerdict("http", checkUnknown, checkSafe(err.Error()), "", nil), a.checkJSON)
+		}
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 2
+	}
+	warnInsecure(os.Stderr, spec)
 
 	logger, _, cleanup := newLogger(modeCLI)
 	defer cleanup()
@@ -321,6 +344,11 @@ func runCurlImport(args []string) int {
 		fmt.Fprintln(os.Stderr, "weeb:", err)
 		return 2
 	}
+	if err := preflightSpec(spec); err != nil {
+		fmt.Fprintln(os.Stderr, "weeb:", err)
+		return 2
+	}
+	warnInsecure(os.Stderr, spec) // a pasted -k is as loud as a typed one
 
 	logger, _, cleanup := newLogger(modeCLI)
 	defer cleanup()
@@ -533,12 +561,12 @@ func runCert(args []string) int {
 		return 2
 	}
 	if clientCertPath != "" {
-		pair, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+		pair, err := loadClientCert(clientCertPath, clientKeyPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "weeb: load client cert: %v\n", err)
+			fmt.Fprintln(os.Stderr, "weeb:", err)
 			return 2
 		}
-		opts.clientCert = &pair
+		opts.clientCert = pair
 	}
 
 	personaMode, err := resolvePersona(persona)
@@ -747,6 +775,66 @@ func parseCLI(args []string) (cliArgs, error) {
 				a.crit = d
 			}
 
+		case arg == "-k" || arg == "--insecure":
+			a.tls.Insecure = true
+
+		case arg == "--cacert", arg == "--key":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			if arg == "--cacert" {
+				a.tls.CACert = val
+			} else {
+				a.tls.Key = val
+			}
+
+		case arg == "-E" || arg == "--cert":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			if a.tls.Cert, err = parseCertArg(val); err != nil {
+				return a, err
+			}
+
+		case arg == "-F" || arg == "--form" || arg == "--form-string":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			f, err := parseFormArg(val, arg == "--form-string")
+			if err != nil {
+				return a, err
+			}
+			a.form = append(a.form, f)
+
+		case arg == "-b" || arg == "--cookie":
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			header, file, err := parseCookieArg(val)
+			if err != nil {
+				return a, err
+			}
+			if header != "" {
+				a.headers = append(a.headers, Header{Key: "Cookie", Value: header})
+			}
+			if file != "" {
+				a.cookieFile = file
+			}
+
+		case arg == "--cookie-jar": // curl's -c; weeb's -c is --crit
+			val, err := nextArg(args, &i, arg)
+			if err != nil {
+				return a, err
+			}
+			if err := checkCookieJarArg(val); err != nil {
+				return a, err
+			}
+			a.cookieJar = val
+
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			return a, fmt.Errorf("unknown flag %q", arg)
 
@@ -768,6 +856,18 @@ func parseCLI(args []string) (cliArgs, error) {
 
 	// A missing URL is fine when we're opening the interactive builder (the
 	// caller decides); it's only an error in headless mode (see main).
+
+	// -F builds the body itself: it can't share it with -d, and a piped
+	// stdin isn't read as a body behind its back. Like -d, it implies POST.
+	if len(a.form) > 0 {
+		if bodySet {
+			return a, fmt.Errorf("-d and -F can't be combined (one request body)")
+		}
+		bodySet = true
+		if !methodSet {
+			a.method = "POST"
+		}
+	}
 
 	// No explicit body but stdin is piped -> read the pipe as the body.
 	if !bodySet && stdinIsPiped() {
@@ -880,6 +980,25 @@ OPTIONS
                         implies headless)
       --max-body SIZE   cap for bodies weeb buffers to render (default 64m);
                         bytes or k/m/g, 0 = no cap. Piped/-o bodies are never capped
+  -k, --insecure        skip TLS certificate verification. Never silent: a warning
+                        goes to stderr, and the TUI shows a red INSECURE badge
+      --cacert FILE     trust the CA certificates in this PEM file INSTEAD of the
+                        system roots, like curl (the server must chain to one)
+  -E, --cert FILE       client certificate (PEM) for mTLS; the key may be in the
+                        same file. curl's FILE:PASSWORD isn't supported (decrypt
+                        the key first); write a colon in the name as \:
+      --key FILE        the client certificate's private key (PEM), if separate
+  -F, --form NAME=...   add a multipart/form-data part (repeatable; implies POST):
+                          name=value                            a text field
+                          name=@file[;type=MIME][;filename=N]   upload a file
+                          name=<file                            text read from file
+                        quote a value holding ';' as name="a;b". --form-string
+                        NAME=VALUE sends VALUE as-is (no @, <, or ; handling)
+  -b, --cookie DATA     send cookies "a=1; b=2"; DATA without '=' is a Netscape
+                        cookie file loaded into a cookie jar (a missing file is fine)
+      --cookie-jar FILE after the request, write the jar's cookies to FILE
+                        (Netscape format, mode 0600) — curl's -c, which weeb
+                        uses for --crit. -b FILE --cookie-jar FILE keeps a session
   -h, --help            show this help
 
 MONITORING (--check; a check_http replacement)
@@ -901,8 +1020,10 @@ MONITORING (--check; a check_http replacement)
 CURL IMPORT (weeb curl '<command>')
   Paste a curl command (from docs, DevTools "Copy as cURL", etc.) and weeb runs
   it: -X/-H/-d/--data*, -u (basic auth), -A/-b/-e, @file bodies. Transfer-only
-  flags (-L, -k, --compressed, …) are ignored. The command may be one quoted
+  flags (-L, --compressed, …) are ignored. The command may be one quoted
   string or already shell-split.
+  Also honored: -F/--form/--form-string, -k/--insecure (with the same stderr
+  warning), --cacert, -E/--cert, --key, -b FILE, and -c/--cookie-jar FILE.
     weeb curl 'curl -X POST https://api.example.com/u -H "Accept: application/json" -d @body.json'
 
 CERT OPTIONS (weeb cert HOST)  — a friendlier 'openssl s_client'
