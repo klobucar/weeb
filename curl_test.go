@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestTokenizeShell(t *testing.T) {
@@ -337,5 +339,66 @@ func TestToCurlAndRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Headers, spec.Headers) {
 		t.Errorf("round-trip headers:\n got %+v\nwant %+v", got.Headers, spec.Headers)
+	}
+}
+
+// A method imported from a pasted curl command is attacker-controlled; the
+// export must quote it, or `-X 'GET;id'` becomes `curl -X GET;ID …` and the
+// shell runs a second command when the user pastes weeb's output.
+func TestToCurlQuotesMethod(t *testing.T) {
+	spec := RequestSpec{Method: "GET;id", URL: "https://x"}
+	for _, multiline := range []bool{false, true} {
+		got := toCurl(spec, multiline)
+		if !strings.HasPrefix(got, `curl -X 'GET;ID' `) {
+			t.Errorf("toCurl(multiline=%v) = %q, want the method single-quoted", multiline, got)
+		}
+		if plain := ansi.Strip(renderCurl(spec, newStyles(), true, multiline)); plain != got {
+			t.Errorf("colored renderCurl differs from toCurl:\n got %q\nwant %q", plain, got)
+		}
+	}
+}
+
+// curl reads `--data @path` as "upload this file", so a body that merely
+// starts with '@' must be exported with --data-raw to stay a literal.
+func TestToCurlBodyWithAtSignStaysLiteral(t *testing.T) {
+	spec := RequestSpec{Method: "POST", URL: "https://x", Body: []byte("@/home/me/.ssh/id_ed25519")}
+	got := toCurl(spec, false)
+	if !strings.Contains(got, "--data-raw @/home/me/.ssh/id_ed25519") {
+		t.Errorf("toCurl = %q, want the body passed with --data-raw", got)
+	}
+	argv, err := tokenizeShell(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := parseCurl(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(back.Body) != string(spec.Body) {
+		t.Errorf("re-import body = %q, want %q", back.Body, spec.Body)
+	}
+}
+
+// curl reads `-H 'Name:'` as "remove this header"; a header weeb sends with an
+// empty value must export as curl's `Name;` form instead.
+func TestToCurlEmptyHeaderValue(t *testing.T) {
+	spec := RequestSpec{URL: "https://x", Headers: []Header{{Key: "X-Empty", Value: ""}}}
+	if got := toCurl(spec, false); !strings.Contains(got, "-H 'X-Empty;'") {
+		t.Errorf("toCurl = %q, want -H 'X-Empty;'", got)
+	}
+	argv, _ := tokenizeShell(toCurl(spec, false))
+	back, err := parseCurl(argv)
+	if err != nil || len(back.Headers) != 1 || back.Headers[0] != spec.Headers[0] {
+		t.Errorf("re-import = %+v, %v; want %+v", back.Headers, err, spec.Headers)
+	}
+}
+
+// A URL beginning with '-' must be exported behind --url, not as a bare
+// argument curl would read as a flag.
+func TestToCurlDashURL(t *testing.T) {
+	spec := RequestSpec{URL: "-?0"}
+	got := toCurl(spec, false)
+	if got != "curl --url '-?0'" {
+		t.Errorf("toCurl = %q, want curl --url '-?0'", got)
 	}
 }

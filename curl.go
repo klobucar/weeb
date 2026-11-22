@@ -24,7 +24,10 @@ func toCurl(spec RequestSpec, multiline bool) string {
 
 	head := "curl"
 	if method != "GET" {
-		head += " -X " + method
+		head += " -X " + shellQuote(method)
+	}
+	if strings.HasPrefix(spec.URL, "-") {
+		head += " --url" // a bare URL starting with '-' would be read as a flag
 	}
 	head += " " + shellQuote(spec.URL)
 
@@ -33,10 +36,12 @@ func toCurl(spec RequestSpec, multiline bool) string {
 		if strings.TrimSpace(h.Key) == "" {
 			continue
 		}
-		segs = append(segs, "-H "+shellQuote(h.Key+": "+h.Value))
+		segs = append(segs, "-H "+shellQuote(curlHeaderArg(h)))
 	}
 	if len(spec.Body) > 0 && methodAllowsBody(method) {
-		segs = append(segs, "--data "+shellQuote(string(spec.Body)))
+		// --data-raw, not --data: curl treats a leading @ in --data as a file
+		// to upload, which would turn a literal body into a file read.
+		segs = append(segs, "--data-raw "+shellQuote(string(spec.Body)))
 	}
 
 	sep := " "
@@ -62,7 +67,10 @@ func renderCurl(spec RequestSpec, st styles, color, multiline bool) string {
 	head := lipgloss.NewStyle().Bold(true).Foreground(cGreen).Render("curl")
 	if method != "GET" {
 		head += " " + flag("-X") + " " +
-			lipgloss.NewStyle().Bold(true).Foreground(methodColor(method)).Render(method)
+			lipgloss.NewStyle().Bold(true).Foreground(methodColor(method)).Render(shellQuote(method))
+	}
+	if strings.HasPrefix(spec.URL, "-") {
+		head += " " + flag("--url")
 	}
 	head += " " + lipgloss.NewStyle().Foreground(cBlue).Render(shellQuote(spec.URL))
 
@@ -71,10 +79,10 @@ func renderCurl(spec RequestSpec, st styles, color, multiline bool) string {
 		if strings.TrimSpace(h.Key) == "" {
 			continue
 		}
-		segs = append(segs, flag("-H")+" "+str(shellQuote(h.Key+": "+h.Value)))
+		segs = append(segs, flag("-H")+" "+str(shellQuote(curlHeaderArg(h))))
 	}
 	if len(spec.Body) > 0 && methodAllowsBody(method) {
-		segs = append(segs, flag("--data")+" "+str(shellQuote(string(spec.Body))))
+		segs = append(segs, flag("--data-raw")+" "+str(shellQuote(string(spec.Body))))
 	}
 
 	sep := " "
@@ -82,6 +90,16 @@ func renderCurl(spec RequestSpec, st styles, color, multiline bool) string {
 		sep = " \\\n  "
 	}
 	return strings.Join(segs, sep)
+}
+
+// curlHeaderArg renders a header as a -H value. curl reads "Name:" with
+// nothing after the colon as "remove this header", so an empty value uses
+// curl's "Name;" form, which sends the header with an empty value.
+func curlHeaderArg(h Header) string {
+	if v := strings.TrimSpace(h.Value); v != "" {
+		return h.Key + ": " + v
+	}
+	return h.Key + ";"
 }
 
 // shellQuote single-quotes s for a POSIX shell unless it is already a bare,
