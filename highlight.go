@@ -15,6 +15,13 @@ import (
 // and punctuation. Whitespace and structure are passed through untouched so the
 // indentation is preserved exactly.
 func colorizeJSON(s string, st styles) string {
+	// lipgloss expands tabs to 4 spaces in Render. Malformed JSON reaches here
+	// verbatim (json.Indent failed), and a raw tab inside one of its strings
+	// must stay a tab: coloring may never change the text. Only string tokens
+	// can hold one.
+	st.jsonKey = st.jsonKey.TabWidth(lipgloss.NoTabConversion)
+	st.jsonStr = st.jsonStr.TabWidth(lipgloss.NoTabConversion)
+
 	var b strings.Builder
 	b.Grow(len(s) * 2)
 
@@ -23,8 +30,12 @@ func colorizeJSON(s string, st styles) string {
 		switch {
 		case c == '"':
 			j := i + 1
-			for j < len(s) {
-				if s[j] == '\\' && j+1 < len(s) {
+			// A string token ends at a raw newline too: JSON strings can't hold
+			// one, and lipgloss pads a multi-line Render to a block, appending
+			// spaces — so an unterminated string in malformed JSON would
+			// otherwise swallow (and alter) the rest of the document.
+			for j < len(s) && s[j] != '\n' {
+				if s[j] == '\\' && j+1 < len(s) && s[j+1] != '\n' {
 					j += 2
 					continue
 				}

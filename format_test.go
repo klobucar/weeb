@@ -160,10 +160,50 @@ func TestSanitizeTTY(t *testing.T) {
 		{"unterminated OSC 8 dropped", "\x1b]8;;https://x", ""},
 		{"multibyte UTF-8 kept intact", "café ▾█ 日本語", "café ▾█ 日本語"},
 		{"UTF-8 around dropped sequence", "é\x1b]52;c;x\x07ñ", "éñ"},
+		{"SGR colon and 256/truecolor params kept", "\x1b[38:2::1:2:3m\x1b[38;5;208mx\x1b[m", "\x1b[38:2::1:2:3m\x1b[38;5;208mx\x1b[m"},
+		{"8-bit SGR kept", "\x9b31mred\x9b0m", "\x9b31mred\x9b0m"},
+		{"XTMODKEYS (CSI > m) dropped", "A\x1b[>4;2mB", "AB"},
+		{"XTQMODKEYS query (CSI ? m) dropped", "A\x1b[?4mB", "AB"},
+		{"8-bit private CSI m dropped", "A\x9b>4;2mB", "AB"},
+		{"CSI m with intermediate dropped", "A\x1b[1 mB", "AB"},
+		{"truncated UTF-8 swallowing 8-bit CSI replaced", "\xe6\x9b2J", "�2J"},
+		{"truncated UTF-8 at end replaced", "ok\xe6\x97", "ok�"},
+		{"truncated UTF-8 swallowing trailing ESC neutralized", "ok\xe8\x1b", "ok�"},
+		{"truncated UTF-8 before CSI", "\xe8\x1b[2Jspoof", "�spoof"},
+		{"SGR with >32 params kept without panic", "\x1b[" + strings.Repeat("1;", 40) + "0mX", "\x1b[" + strings.Repeat("1;", 40) + "0mX"},
+		{"unterminated CSI with >32 params dropped without panic", "X\x9b" + strings.Repeat(":", 40) + "0", "X"},
+		{"OSC 8 with id and UTF-8 URI kept", "\x1b]8;id=1;https://例え.jp/ü\x1b\\link\x1b]8;;\x1b\\", "\x1b]8;id=1;https://例え.jp/ü\x1b\\link\x1b]8;;\x1b\\"},
+		{"OSC 8 with UTF-8 C1 CSI dropped", "\x1b]8;;https://x\xc2\x9b2J\x07link", "link"},
+		{"OSC 8 with UTF-8 C1 OSC dropped", "\x1b]8;;https://x\xc2\x9d0;t\x07link", "link"},
+		{"OSC 8 with raw 8-bit CSI dropped", "\x1b]8;;https://x\x9b2J\x07link", "link"},
+		{"OSC 8 with ENQ dropped", "\x1b]8;;https://x\x05\x07link", "link"},
+		{"OSC 8 with CR/BS dropped", "\x1b]8;;https://x\r\b\x1b\\link", "link"},
+		{"OSC 8 with invalid UTF-8 dropped", "\x1b]8;;https://x\xff\x07link", "link"},
 	}
 	for _, c := range cases {
 		if got := sanitizeTTY(c.in); got != c.want {
 			t.Errorf("%s: sanitizeTTY(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+// TestSanitizeTTYKeepsOwnStyling: weeb's own colored renders — lipgloss SGR
+// and glamour's OSC 8 links — must survive the TTY boundary byte for byte.
+func TestSanitizeTTYKeepsOwnStyling(t *testing.T) {
+	st := newStyles()
+	for name, out := range map[string]string{
+		"json":     renderBody([]byte(`{"a":[1,true,null,"s"]}`), "application/json", "", st, true, true, 0),
+		"xml":      renderBody([]byte(`<a x="1"><!-- c --><b>t</b></a>`), "application/xml", "", st, true, true, 0),
+		"markdown": renderBody([]byte("# T\n\nsee [docs](https://example.com/p?q=1) and **bold**\n"), "text/markdown", "", st, true, true, 80),
+	} {
+		if !strings.Contains(out, "\x1b[") {
+			t.Errorf("%s: expected colored output, got %q", name, out)
+		}
+		if name == "markdown" && !strings.Contains(out, "\x1b]8;") {
+			t.Errorf("markdown: expected an OSC 8 link, got %q", out)
+		}
+		if got := sanitizeTTY(out); got != out {
+			t.Errorf("%s: sanitizeTTY changed weeb's own output:\n in: %q\nout: %q", name, out, got)
 		}
 	}
 }

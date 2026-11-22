@@ -11,13 +11,15 @@ func TestColorizeJSONMalformedInput(t *testing.T) {
 	// Invalid JSON still reaches colorizeJSON when json.Indent fails and the
 	// raw bytes are colorized as-is; none of these may panic or alter content.
 	cases := []string{
-		`{"a\`,          // string ending in a lone backslash at EOF
-		`{"a": "b\`,     // lone backslash in a value
-		`"`,             // bare unterminated string
-		`\`,             // single backslash
-		`{"a": "b\\"}`,  // escaped backslash before closing quote
-		`{"a": "b\""}`,  // escaped quote
-		`{"key": 12e+}`, // malformed number
+		`{"a\`,                    // string ending in a lone backslash at EOF
+		`{"a": "b\`,               // lone backslash in a value
+		`"`,                       // bare unterminated string
+		`\`,                       // single backslash
+		`{"a": "b\\"}`,            // escaped backslash before closing quote
+		`{"a": "b\""}`,            // escaped quote
+		`{"key": 12e+}`,           // malformed number
+		"{\"k\t\": \"a\tb\"}",     // raw tabs inside a key and a value (lipgloss expands tabs by default)
+		"{\"a\": \"b\n  \"c\\\n}", // unterminated strings running into newlines (lipgloss pads multi-line renders)
 	}
 	for _, in := range cases {
 		if got := ansi.Strip(colorizeJSON(in, st)); got != in {
