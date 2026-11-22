@@ -45,6 +45,7 @@ own site, leaf → ISRG Root:
 - **curl-shaped CLI** — `-H`, `-d @file`/`-`/stdin, `-X`, interleaved flags and positionals, just like you already type.
 - **curl import & export** — paste a `curl` command to run it (`weeb curl '…'`), or turn any request into one (`--to-curl`, or `ctrl+x` in the TUI).
 - **Pretty bodies** — JSON, XML, HTML & YAML get syntax color and **collapsible folding**; Markdown gets a full [Glamour](https://github.com/charmbracelet/glamour) render. `--raw` for the exact bytes.
+- **File viewer** — `weeb view data.json` (or `… | weeb view`) browses a local JSON/XML/HTML/YAML/Markdown file in the same foldable pane, like jless or fx; piped, it's a pretty-printer.
 - **TLS inspection** — a friendlier `openssl s_client`: full chain, expiry, SANs, ciphers, OCSP/SCT, plus `--starttls`, `--sni` override, `--alpn`, version pinning, client certs, and `--pem` dump.
 - **Timing breakdown** — per-phase DNS / TCP / TLS / send / wait / recv stats with a colored bar.
 - **Two outputs, kept apart** — a human-facing error *voice* (configurable, optionally anime) and structured *logs* to a file.
@@ -139,6 +140,53 @@ In the response pane, fold to cut the noise:
 | `←` / `→` | Select a section or JSON/XML/HTML/YAML node |
 | `enter` | Fold / unfold the selection |
 | `-` / `+` | Fold / unfold everything |
+
+## Viewing files
+
+`weeb view` points the response pane at a local file instead of a request, so
+it works as a JSON/XML/HTML/YAML/Markdown viewer in the vein of jless or fx:
+
+```sh
+weeb view data.json
+weeb view - < page.html
+kubectl get pod web -o yaml | weeb view --type yaml
+```
+
+It reads FILE, or stdin when FILE is `-` or left out. There's no Content-Type,
+so the format comes from the file extension, then a content sniff, just like a
+response with a generic Content-Type. YAML is never sniffed, so piped YAML needs
+`--type yaml`, and XML without an `<?xml …?>` declaration sniffs as HTML unless
+you pass `--type xml`. The pane's Body summary shows the file name, size and
+format.
+
+At a terminal it opens a viewer-only TUI with no request form. Even with the
+data piped in, keys come from the terminal (`/dev/tty`, or `CONIN$` on Windows).
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Scroll |
+| `←` / `→` | Select a section or node |
+| `enter` | Fold / unfold the selection |
+| `-` / `+` | Fold / unfold everything |
+| `ctrl+p` | Toggle pretty / raw |
+| `ctrl+y` | Toggle 🌈 mode |
+| `q` · `ctrl+c` | Quit |
+
+Piped or redirected, it prints the pretty render without color instead, so it
+doubles as a formatter: `weeb view data.json > pretty.json`. JSON and XML are
+reindented; HTML, YAML and Markdown come out as their source, since their
+pretty forms are color-only.
+
+| Flag | Description |
+|------|-------------|
+| `--type T` | Force the format: `json` · `xml` · `html` · `yaml` · `md` |
+| `--raw` | Piped: write the bytes unchanged. At a terminal: open in the raw view |
+| `--max-body SIZE` | Refuse input larger than SIZE (default `64m`, `0` = no cap; overrides `WEEB_MAX_BODY`) |
+
+Files are treated as untrusted, like response bodies (you may be viewing
+something you just downloaded). Terminal control sequences in the content are
+stripped before they reach the screen, and a file name containing control
+characters is shown quoted.
 
 ## curl import & export
 

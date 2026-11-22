@@ -13,7 +13,7 @@ import (
 // a subcommand or flag is added (to main's dispatch, parseCLI, or runCert),
 // extend the matching slice here and every shell picks it up.
 var (
-	completionSubcommands = []string{"cert", "curl", "completion", "history", "version", "help"}
+	completionSubcommands = []string{"cert", "curl", "completion", "history", "view", "version", "help"}
 	completionMethods     = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 	// Flags of a plain `weeb [METHOD] URL …` invocation (see parseCLI).
 	completionMainFlags = []string{
@@ -28,6 +28,10 @@ var (
 		"--short", "--sni", "--servername", "--starttls", "--alpn", "--tls",
 		"--client-cert", "--cert", "--client-key", "--key", "--timeout",
 		"--persona",
+	}
+	// Flags accepted after `weeb view` (see parseViewArgs).
+	completionViewFlags = []string{
+		"--type", "--raw", "--max-body", "-h", "--help",
 	}
 	completionPersonas = []string{"plain", "dere", "tsun", "yan"}
 )
@@ -65,10 +69,13 @@ _weeb() {
   mainflags=(%[3]s)
   certflags=(%[4]s)
   personas=(%[5]s)
+  local -a viewflags
+  viewflags=(%[6]s)
 
   # Flags whose value we can complete.
   case "${words[CURRENT-1]}" in
     --persona) compadd -a personas; return ;;
+    --type) compadd json xml html yaml md; return ;;
     -X|--request) compadd -a methods; return ;;
     -o|--output|-d|--data|--client-cert|--cert|--client-key|--key) _files; return ;;
   esac
@@ -82,6 +89,7 @@ _weeb() {
   case "${words[2]}" in
     cert|tls)   _arguments $certflags '*:host:_hosts' ;;
     completion) (( CURRENT == 3 )) && compadd zsh bash ;;
+    view)       _arguments $viewflags '*:file:_files' ;;
     curl|import|version|help) ;;
     *)          _arguments $mainflags '*:url:_urls' ;;
   esac
@@ -94,6 +102,7 @@ _weeb "$@"
 		strings.Join(completionMainFlags, " "),
 		strings.Join(completionCertFlags, " "),
 		strings.Join(completionPersonas, " "),
+		strings.Join(completionViewFlags, " "),
 	)
 }
 
@@ -112,10 +121,12 @@ _weeb() {
   local mainflags="%[3]s"
   local certflags="%[4]s"
   local personas="%[5]s"
+  local viewflags="%[6]s"
 
   # Flags whose value we can complete.
   case "$prev" in
     --persona) COMPREPLY=($(compgen -W "$personas" -- "$cur")); return ;;
+    --type) COMPREPLY=($(compgen -W "json xml html yaml md" -- "$cur")); return ;;
     -X|--request) COMPREPLY=($(compgen -W "$methods" -- "$cur")); return ;;
     -o|--output|-d|--data|--client-cert|--cert|--client-key|--key)
       COMPREPLY=($(compgen -f -- "$cur")); return ;;
@@ -130,6 +141,7 @@ _weeb() {
   case "${COMP_WORDS[1]}" in
     cert|tls)   COMPREPLY=($(compgen -W "$certflags" -- "$cur")) ;;
     completion) COMPREPLY=($(compgen -W "zsh bash" -- "$cur")) ;;
+    view)       COMPREPLY=($(compgen -W "$viewflags" -- "$cur") $(compgen -f -- "$cur")) ;;
     curl|import|version|help) ;;
     *)          COMPREPLY=($(compgen -W "$mainflags" -- "$cur")) ;;
   esac
@@ -142,5 +154,6 @@ complete -F _weeb weeb
 		strings.Join(completionMainFlags, " "),
 		strings.Join(completionCertFlags, " "),
 		strings.Join(completionPersonas, " "),
+		strings.Join(completionViewFlags, " "),
 	)
 }
