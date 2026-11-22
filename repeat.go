@@ -306,13 +306,15 @@ func summarizeRepeat(samples []repeatSample, elapsed time.Duration) repeatSummar
 		} else {
 			s.NewConns++
 		}
-		if t.DNS > 0 {
+		// By whether the phase ran, not duration > 0: a loopback connect can
+		// measure 0 on a coarse clock (Windows) and still be a new connection.
+		if t.DidDNS {
 			dns = append(dns, t.DNS)
 		}
-		if t.TCP > 0 {
+		if t.DidConnect {
 			connect = append(connect, t.TCP)
 		}
-		if t.TLS > 0 {
+		if t.DidTLS {
 			tlsHS = append(tlsHS, t.TLS)
 		}
 		wait = append(wait, t.Server)

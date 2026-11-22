@@ -51,7 +51,7 @@ func TestNewRepeatPhase(t *testing.T) {
 
 func TestSummarizeRepeat(t *testing.T) {
 	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
-	fresh := Timing{DNS: ms(1), TCP: ms(2), TLS: ms(3), Server: ms(10), Total: ms(20)}
+	fresh := Timing{DNS: ms(1), TCP: ms(2), TLS: ms(3), DidDNS: true, DidConnect: true, DidTLS: true, Server: ms(10), Total: ms(20)}
 	reused := Timing{Server: ms(5), Total: ms(6), Reused: true}
 	samples := []repeatSample{
 		{timing: fresh, status: 200},
@@ -408,7 +408,7 @@ func TestRunCLIRepeat(t *testing.T) {
 
 func TestRenderRepeat(t *testing.T) {
 	s := summarizeRepeat([]repeatSample{
-		{timing: Timing{TCP: time.Millisecond, Server: 2 * time.Millisecond, Total: 3 * time.Millisecond}, status: 200},
+		{timing: Timing{TCP: time.Millisecond, DidConnect: true, Server: 2 * time.Millisecond, Total: 3 * time.Millisecond}, status: 200},
 		{timing: Timing{Server: 1500 * time.Millisecond, Total: 1600 * time.Millisecond, Reused: true}, status: 404},
 		{errKey: "dial: connection refused"},
 	}, time.Second)
