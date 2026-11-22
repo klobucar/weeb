@@ -127,6 +127,11 @@ type model struct {
 	respCursor   int
 	foldState    map[string]bool
 
+	// status is a transient message shown in place of the key help (e.g.
+	// "copied curl to clipboard"); statusSeq pairs it with its clear timer.
+	status    string
+	statusSeq int
+
 	width, height int
 	ready         bool
 }
@@ -276,6 +281,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderCert(msg)
 		return m, nil
 
+	case statusClearMsg:
+		if msg.seq == m.statusSeq {
+			m.status = ""
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		switch {
 		case key.Matches(msg, m.keys.Quit):
@@ -331,7 +342,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.respHeading = "curl ⤵  (ctrl+x back)"
 			m.setResp(renderCurl(resolveSpec(m.specFromForm()), m.styles, true, true))
 			m.resp.GotoTop()
-			return m, nil
+			// Also copy it, unstyled: the same text --to-curl prints. A runnable
+			// curl carries the credentials (WEEB_TOKEN's Authorization included),
+			// and clipboard managers keep history, so the status says so rather
+			// than copying a secret silently.
+			spec := resolveSpec(m.specFromForm())
+			what := "curl"
+			if specHasCredentials(spec) {
+				what = "curl (includes credentials)"
+			}
+			cmd := m.copyText(what, toCurl(spec, true))
+			return m, cmd
 
 		case key.Matches(msg, m.keys.NextField):
 			m.cycleFocus(1)
@@ -391,6 +412,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case focResponse:
+			// Copy keys are plain letters, so they only live here, never while
+			// a text field is focused; copySelection says when there's nothing.
+			if key.Matches(msg, m.keys.CopyPath, m.keys.CopyValue) {
+				cmd := m.copySelection(key.Matches(msg, m.keys.CopyValue))
+				return m, cmd
+			}
 			// Fold controls take precedence over viewport scrolling, whenever the
 			// pane has foldable sections (HTTP response or the TLS cert view).
 			if m.hasSections() {
@@ -809,6 +836,9 @@ func (m model) renderHelpLine() string {
 		}
 		return m.spinner.View() + " " + m.styles.hint.Render(label)
 	}
+	if m.status != "" {
+		return m.statusLine()
+	}
 
 	pairs := [][2]string{
 		{"ctrl+s", "send"}, {"ctrl+t", "cert"}, {"ctrl+x", "curl"}, {"ctrl+p", "pretty"},
@@ -842,7 +872,7 @@ func (m model) renderResponsePane() string {
 	title := m.respHeading
 	if m.currentFocus().kind == focResponse {
 		if m.hasSections() {
-			title += "  (↑↓ scroll · ←→ select · enter fold · ± all)"
+			title += "  (↑↓ scroll · ←→ select · enter fold · ± all · y/Y copy)"
 		} else {
 			title += "  (↑↓ scroll)"
 		}

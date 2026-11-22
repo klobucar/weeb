@@ -163,7 +163,8 @@ Going the other way, turn the request you just built into a shareable command:
 weeb POST https://api.example.com/users -H "Accept: application/json" -d '{"a":1}' --to-curl
 ```
 
-In the TUI, `ctrl+x` shows the curl equivalent of the current form.
+In the TUI, `ctrl+x` shows the curl equivalent of the current form and copies
+it to your clipboard.
 
 ## History
 
@@ -283,11 +284,22 @@ plus the node_exporter textfile collector is a one-line cron job, or wire
 | `ctrl+o` / `ctrl+r` | Add / remove a header row |
 | `ctrl+s` | Send the request |
 | `ctrl+t` | Inspect the TLS cert |
-| `ctrl+x` | Export the current request as `curl` |
+| `ctrl+x` | Export the current request as `curl` and copy it to the clipboard |
+| `y` / `Y` | Copy the selected node's path / value (response pane only) |
 | `ctrl+p` | Toggle pretty / raw |
 | `ctrl+y` | Toggle 🌈 mode |
 | `ctrl+g` | Toggle the debug log pane |
 | `ctrl+c` | Quit |
+
+Copying uses OSC 52, so it works over SSH with nothing extra installed, as long
+as your terminal allows it (iTerm2: *Applications in terminal may access
+clipboard*; tmux: `set -g set-clipboard on`). `y` copies a jq path for JSON and
+YAML (`.items[3]`, `.["weird key"]`) or an XPath-like one for XML and HTML
+(`/root/item[3]`). `Y` copies the value: compact JSON, the YAML fragment, or the
+element's source. On a section heading, `Y` copies that section, and on **Body**
+the raw body. Copies are plain text, with styling and control characters
+stripped, and anything over 75 KB is truncated (terminals drop larger OSC 52
+writes); the status line says when that happens.
 
 ## Environment
 
