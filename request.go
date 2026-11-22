@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	log "charm.land/log/v2"
@@ -116,6 +117,20 @@ type RequestSpec struct {
 	// (status, Location header, body) instead of whatever it points at.
 	NoFollow bool
 
+	// TLS carries -k, --cacert and --cert/--key; the zero value verifies
+	// against the system roots, as before.
+	TLS TLSOptions
+
+	// Form, when set, is a multipart/form-data body (-F) that takes the place
+	// of Body. Upload files are read when the request is sent.
+	Form []FormField
+
+	// CookieFile (-b FILE) seeds a cookie jar from a Netscape cookie file and
+	// CookieJar (--cookie-jar FILE, curl's -c) receives the jar's cookies
+	// afterwards. Either one turns the jar on for the request, every
+	// redirect hop included.
+	CookieFile string
+	CookieJar  string
 	// OnStream, when non-nil, takes event streams live: if the response is
 	// text/event-stream or JSON lines (see streamFormatOf), Do hands it the
 	// response metadata as soon as the headers arrive, then each event as it
@@ -192,6 +207,11 @@ type Client struct {
 	// on an event stream, where it becomes an idle timeout. Only the DEFAULT
 	// timeout steps aside for a BodySink or an event stream.
 	explicitTimeout bool
+
+	// transports caches one transport per TLSOptions (see tlsTransport); the
+	// TUI sends from a goroutine, hence the lock.
+	trMu       sync.Mutex
+	transports map[tlsTransportKey]*http.Transport
 
 	// noHistory skips history recording. --repeat sets it: N copies of one
 	// request would push real entries out of the capped file, and
@@ -330,9 +350,18 @@ func (c *Client) Do(spec RequestSpec) Result {
 // (the TUI's stop key). A live event stream stopped that way ends cleanly —
 // the events that arrived stand, Result.Stopped is set and Err stays nil —
 // while any other request stopped early fails as stopped.
-func (c *Client) DoContext(ctx context.Context, spec RequestSpec) Result {
+//
+// res is named so the deferred cookie-jar write can still report a failure.
+func (c *Client) DoContext(ctx context.Context, spec RequestSpec) (res Result) {
 	spec = resolveSpec(spec)
-	res := Result{Method: strings.ToUpper(strings.TrimSpace(spec.Method)), URL: spec.URL}
+	res = Result{Method: strings.ToUpper(strings.TrimSpace(spec.Method)), URL: spec.URL}
+
+	// -F parts become the body here, before the request is built, so history
+	// records the bytes actually sent.
+	spec, err := materializeForm(spec)
+	if err != nil {
+		return c.badRequest(res, err)
+	}
 
 	req, err := buildRequest(spec)
 	if err != nil {
@@ -353,6 +382,24 @@ func (c *Client) DoContext(ctx context.Context, spec RequestSpec) Result {
 	if spec.NoFollow {
 		rctx = context.WithValue(rctx, noFollowKey{}, true)
 	}
+
+	// A cookie jar (-b FILE / --cookie-jar) and TLS options each need their
+	// own http.Client; both are settled before anything counts as sent.
+	var jar *cookieSession
+	if spec.CookieFile != "" || spec.CookieJar != "" {
+		if jar, err = newCookieSession(spec.CookieFile); err != nil {
+			return c.badRequest(res, err)
+		}
+	}
+	// A body that goes somewhere as it arrives (a BodySink, or a live stream
+	// for OnStream) can't run under http.Client.Timeout, which would cap the
+	// body too: it takes the live client, and liveTimer applies the timeout.
+	live := spec.BodySink != nil || spec.OnStream != nil
+	httpc, err := c.httpClientFor(spec, jar, live)
+	if err != nil {
+		return c.badRequest(res, err)
+	}
+
 	// Each way weeb ends a request early — the caller's stop, a liveTimer
 	// timeout — cancels with a cause naming why, which explainCancel puts in
 	// the error in place of a bare "context canceled".
@@ -364,17 +411,29 @@ func (c *Client) DoContext(ctx context.Context, spec RequestSpec) Result {
 	// and the closure sees the final res (status, duration) on every return
 	// path below. Best-effort by construction; recordHistory never fails Do.
 	defer func() { c.recordHistory(spec, res) }()
+	// The jar is written whatever happened (curl writes it even on failure:
+	// a redirect hop may have set cookies), and a failed write fails the run.
+	if jar != nil && spec.CookieJar != "" {
+		defer func() {
+			if err := jar.save(spec.CookieJar); err != nil {
+				err = fmt.Errorf("writing cookie jar: %w", err)
+				c.log.Error("cookie jar write failed", "err", err)
+				if res.Err == nil {
+					res.Err = err
+				}
+				if res.DisplayErr != "" {
+					res.DisplayErr += "\n"
+				}
+				res.DisplayErr += c.voice.Render(KindBadRequest, 0, err)
+			}
+		}()
+	}
 
 	tr := &reqTrace{}
 	req = req.WithContext(httptrace.WithClientTrace(rctx, tr.clientTrace()))
 
-	// A body that goes somewhere as it arrives (a BodySink, or a live stream
-	// for OnStream) can't run under http.Client.Timeout, which would cap the
-	// body too; liveTimer applies the timeout there instead.
-	httpc := c.http
 	var lt *liveTimer
-	if spec.BodySink != nil || spec.OnStream != nil {
-		httpc = c.stream
+	if live {
 		lt = startLiveTimer(c.http.Timeout, cancel)
 		defer lt.stop()
 	}
@@ -495,6 +554,15 @@ func (c *Client) DoContext(ctx context.Context, spec RequestSpec) Result {
 		res.Err = statusErr
 		res.DisplayErr = c.voice.Render(KindHTTPStatus, resp.StatusCode, statusErr)
 	}
+	return res
+}
+
+// badRequest fails res as a request that couldn't be built — before anything
+// was sent — through both seams.
+func (c *Client) badRequest(res Result, err error) Result {
+	c.log.Error("request failed", "kind", KindBadRequest.String(), "err", err)
+	res.Err = err
+	res.DisplayErr = c.voice.Render(KindBadRequest, 0, err)
 	return res
 }
 

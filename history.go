@@ -243,6 +243,9 @@ func redactBody(body []byte, contentType string) ([]byte, bool) {
 		return bytes.TrimRight(buf.Bytes(), "\n"), true
 	}
 	ct := strings.ToLower(contentType)
+	if strings.HasPrefix(ct, "multipart/") {
+		return redactMultipart(body, contentType) // -F password=…
+	}
 	if strings.Contains(ct, "x-www-form-urlencoded") || (ct == "" && looksFormEncoded(body)) {
 		if s, ok := redactPairs(string(body)); ok {
 			return []byte(s), true

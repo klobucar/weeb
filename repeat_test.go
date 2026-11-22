@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -154,6 +155,7 @@ func TestParseCLIRepeatFlags(t *testing.T) {
 		{"with output", []string{"https://x", "--repeat", "5", "-o", "f"}},
 		{"with include", []string{"https://x", "--repeat", "5", "-i"}},
 		{"with to-curl", []string{"https://x", "--repeat", "5", "--to-curl"}},
+		{"with cookie-jar", []string{"https://x", "--repeat", "5", "--cookie-jar", "jar.txt"}},
 		{"with thresholds", []string{"https://x", "--repeat", "5", "-w", "1s"}},
 		{"missing value", []string{"https://x", "--repeat"}},
 	}
@@ -435,5 +437,17 @@ func TestRenderRepeat(t *testing.T) {
 	}
 	if strings.Contains(out, "tls ") || strings.Contains(out, "dns ") {
 		t.Errorf("phases with no samples should be omitted:\n%s", out)
+	}
+}
+
+// --repeat gets the same pre-send file check as a single request (and the
+// -k warning): a bad --cacert is one usage error, not N failed requests.
+func TestRunCLIRepeatPreflight(t *testing.T) {
+	a, err := parseCLI([]string{"https://127.0.0.1:1/", "--repeat", "3", "--cacert", filepath.Join(t.TempDir(), "missing.pem")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := runCLI(a); code != 2 {
+		t.Errorf("exit = %d, want 2 (usage error before anything is sent)", code)
 	}
 }

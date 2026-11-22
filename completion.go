@@ -21,6 +21,8 @@ var (
 		"-v", "--stats", "--pretty", "--raw", "--no-tui", "--headless",
 		"-q", "--quiet", "--persona", "--to-curl", "-o", "--output",
 		"--max-body", "-h", "--help",
+		"-k", "--insecure", "--cacert", "-E", "--cert", "--key",
+		"-F", "--form", "--form-string", "-b", "--cookie", "--cookie-jar",
 		"--repeat", "--concurrency", "--fresh", "--json",
 		"--expect-header", "--expect-json",
 	}
@@ -90,6 +92,7 @@ _weeb() {
     --type) compadd json xml html yaml md; return ;;
     -X|--request) compadd -a methods; return ;;
     -o|--output|-d|--data|--client-cert|--cert|--client-key|--key) _files; return ;;
+    --cacert|-E|-b|--cookie|--cookie-jar) _files; return ;;
     -f|--file) _files; return ;;
   esac
 
@@ -146,6 +149,8 @@ _weeb() {
     --type) COMPREPLY=($(compgen -W "json xml html yaml md" -- "$cur")); return ;;
     -X|--request) COMPREPLY=($(compgen -W "$methods" -- "$cur")); return ;;
     -o|--output|-d|--data|--client-cert|--cert|--client-key|--key)
+      COMPREPLY=($(compgen -f -- "$cur")); return ;;
+    --cacert|-E|-b|--cookie|--cookie-jar)
       COMPREPLY=($(compgen -f -- "$cur")); return ;;
     -f|--file) COMPREPLY=($(compgen -f -- "$cur")); return ;;
   esac
@@ -253,7 +258,8 @@ func fishFlagValue(flag string) string {
 		return " -x -a " + fishWords(completionMethods)
 	case "--type":
 		return " -x -a " + fishWords([]string{"json", "xml", "html", "yaml", "md"})
-	case "-o", "--output", "-d", "--data", "--client-cert", "--cert", "--client-key", "--key", "-f", "--file":
+	case "-o", "--output", "-d", "--data", "--client-cert", "--cert", "--client-key", "--key", "-f", "--file",
+		"--cacert", "-E", "-b", "--cookie", "--cookie-jar": // as the zsh/bash scripts complete files
 		return " -r -F"
 	}
 	return ""

@@ -56,6 +56,9 @@ func (a cliArgs) checkRepeatFlags() error {
 		return fmt.Errorf("--repeat prints a summary; it can't be combined with -i")
 	case a.toCurl:
 		return fmt.Errorf("--repeat can't be combined with --to-curl")
+	case a.cookieJar != "":
+		// N concurrent requests would each rewrite the same jar file.
+		return fmt.Errorf("--repeat can't be combined with --cookie-jar")
 	case a.expectStatus != "" || a.expectBody != "" || a.warn > 0 || a.crit > 0:
 		return fmt.Errorf("--expect-status/--expect-body/-w/-c only apply with --check")
 	}

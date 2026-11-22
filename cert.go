@@ -99,6 +99,20 @@ type certOptions struct {
 	clientCert *tls.Certificate // presented for mTLS when non-nil
 }
 
+// loadClientCert loads a PEM client certificate and private key for mTLS —
+// `weeb cert --client-cert` and a request's --cert/--key alike. An empty
+// keyPath reads the key from the certificate file, which curl allows.
+func loadClientCert(certPath, keyPath string) (*tls.Certificate, error) {
+	if keyPath == "" {
+		keyPath = certPath
+	}
+	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load client cert: %w", err)
+	}
+	return &pair, nil
+}
+
 // certInfo describes a single certificate in the chain.
 type certInfo struct {
 	SubjectCN       string    `json:"subject_cn"`

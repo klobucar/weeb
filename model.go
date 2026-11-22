@@ -101,6 +101,14 @@ type model struct {
 	// untouched env credential from a header the user typed or edited.
 	envHeaders map[Header]bool
 
+	// Request options the form has no widgets for — TLS flags, -F parts and
+	// cookie files — come from the command line and ride along on every send
+	// (and ctrl+x export). renderForm lists them so they're never invisible.
+	tlsOpts    TLSOptions
+	form       []FormField
+	cookieFile string
+	cookieJar  string
+
 	resp      viewport.Model
 	debugView viewport.Model
 	spinner   spinner.Model
@@ -241,6 +249,7 @@ func (m *model) prefill(a cliArgs) {
 	if len(a.body) > 0 {
 		m.body.SetValue(string(a.body))
 	}
+	m.tlsOpts, m.form, m.cookieFile, m.cookieJar = a.tls, a.form, a.cookieFile, a.cookieJar
 	m.onMethodChange() // sync body enabled/disabled for the chosen method
 }
 
@@ -614,7 +623,10 @@ func (m *model) delHeaderIfFocused() {
 // ---- method / body ---------------------------------------------------------
 
 func (m *model) currentMethod() string { return m.methods[m.methodIdx] }
-func (m *model) bodyEnabled() bool     { return methodAllowsBody(m.currentMethod()) }
+
+// bodyEnabled reports whether the body textarea is in use: the method takes a
+// body and no -F parts replace it.
+func (m *model) bodyEnabled() bool { return methodAllowsBody(m.currentMethod()) && len(m.form) == 0 }
 
 func (m *model) onMethodChange() {
 	if !m.bodyEnabled() {
@@ -660,6 +672,10 @@ func (m model) specFromForm() RequestSpec {
 		// final say — a deleted Authorization row must not be re-injected.
 		HeadersResolved: true,
 		envHeaderKeys:   envKeys,
+		TLS:             m.tlsOpts,
+		Form:            m.form,
+		CookieFile:      m.cookieFile,
+		CookieJar:       m.cookieJar,
 	}
 }
 
@@ -767,11 +783,41 @@ func (m model) renderHeader() string {
 	}
 	const wordmark = "✦ weeb ⚡ terminal http client ✦"
 	if m.rainbow {
-		return rainbowText(wordmark, m.frame) + "\n" +
+		return rainbowText(wordmark, m.frame) + m.insecureBadge() + "\n" +
 			rainbowStep(strings.Repeat("━", dw), m.frame, 360.0/float64(dw), false)
 	}
-	return gradientText(wordmark, titleHue0, titleHue1, true) + "\n" +
+	return gradientText(wordmark, titleHue0, titleHue1, true) + m.insecureBadge() + "\n" +
 		gradientText(strings.Repeat("━", dw), titleHue0, titleHue1, false)
+}
+
+// insecureBadge is the TUI's -k marker, beside the wordmark on every frame
+// while sends skip certificate verification. Always red: 🌈 mode doesn't
+// get to make a security warning festive.
+func (m model) insecureBadge() string {
+	if !m.tlsOpts.Insecure {
+		return ""
+	}
+	return "  " + lipgloss.NewStyle().Bold(true).Foreground(cInk).Background(cRed).Padding(0, 1).
+		Render("⚠ INSECURE · TLS not verified (-k)")
+}
+
+// requestOptsLine lists the command-line TLS and cookie-file options on one
+// dim line under the headers, so a send never carries settings the screen
+// doesn't show. -k is left to the louder insecureBadge.
+func (m model) requestOptsLine() string {
+	var parts []string
+	for _, o := range [][2]string{
+		{"--cacert", m.tlsOpts.CACert}, {"--cert", m.tlsOpts.Cert}, {"--key", m.tlsOpts.Key},
+		{"-b", m.cookieFile}, {"--cookie-jar", m.cookieJar},
+	} {
+		if o[1] != "" {
+			parts = append(parts, o[0]+" "+o[1])
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return m.styles.help.Render("  🔐 " + sanitizeTTY(strings.Join(parts, "  ·  ")))
 }
 
 // sectionColors gives each form section its own vivid hue; sectionIcons a glyph.
@@ -862,8 +908,19 @@ func (m model) renderForm() string {
 		)
 		b.WriteString(line + "\n")
 	}
+	if opts := m.requestOptsLine(); opts != "" {
+		b.WriteString(opts + "\n")
+	}
 
-	if m.bodyEnabled() {
+	if len(m.form) > 0 && methodAllowsBody(m.currentMethod()) {
+		// -F parts replace the textarea: list them as curl would read them.
+		b.WriteString(m.label("Body", cur.kind == focBody) + "  ")
+		b.WriteString(m.styles.help.Render("(multipart, from -F on the command line)") + "\n")
+		for _, f := range m.form {
+			flag, arg := curlFormArg(f)
+			b.WriteString(m.styles.headerVal.Render("  "+sanitizeTTY(flag+" "+arg)) + "\n")
+		}
+	} else if m.bodyEnabled() {
 		b.WriteString(m.label("Body", cur.kind == focBody) + "\n")
 		b.WriteString(m.body.View() + "\n")
 	} else {

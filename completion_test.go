@@ -151,6 +151,8 @@ func TestFishCompletionView(t *testing.T) {
 		"complete -c weeb -n '__fish_seen_subcommand_from view' -F",
 		"complete -c weeb -n '__fish_seen_subcommand_from run' -F",
 		"complete -c weeb -n '__fish_seen_subcommand_from cert tls' -l file -r -F",
+		"complete -c weeb -n '__weeb_plain_request' -l cacert -r -F",
+		"complete -c weeb -n '__weeb_plain_request' -l cookie-jar -r -F",
 		"complete -c weeb -n '__fish_seen_subcommand_from audit' -l check",
 		"complete -c weeb -n '__fish_seen_subcommand_from audit' -l persona -x -a 'plain dere tsun yan'",
 	} {
