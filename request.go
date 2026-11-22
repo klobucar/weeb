@@ -115,8 +115,9 @@ type RequestSpec struct {
 	// (status, Location header, body) instead of whatever it points at.
 	NoFollow bool
 
-	// envHeaderKeys holds the lowercased names of the headers resolveSpec
-	// injected from the environment (WEEB_HEADERS, WEEB_TOKEN), so
+	// envHeaderKeys holds the lowercased names of the headers that came from
+	// the environment (WEEB_HEADERS, WEEB_TOKEN) — injected by resolveSpec,
+	// or, for the TUI form, rows still holding their env prefill — so
 	// redirectPolicy can strip exactly those on a cross-origin hop without
 	// touching same-named headers the user typed themselves.
 	envHeaderKeys []string
@@ -222,10 +223,11 @@ type envHeaderKeysCtx struct{}
 // so the ambient env credentials weeb injects (WEEB_HEADERS, WEEB_TOKEN)
 // would otherwise follow a redirect to an attacker origin, and a bearer token
 // would survive a same-host https→http downgrade in cleartext. Only headers
-// resolveSpec actually injected (recorded on the context at build time, not
-// re-read from the env) are stripped: a user-typed header that merely shares
-// a name with a WEEB_HEADERS key is the user's own and follows redirects
-// like any custom header, matching curl.
+// that actually came from the env (spec.envHeaderKeys, recorded on the
+// context at build time, not re-read from the env) are stripped: a user-typed
+// header that merely shares a name with a WEEB_HEADERS key is the user's own
+// and follows redirects like any custom header, matching curl. An auto-added
+// Referer is dropped on every hop, as curl -L never sends one.
 func redirectPolicy(req *http.Request, via []*http.Request) error {
 	// A NoFollow spec wants the 3xx itself: ErrUseLastResponse hands back the
 	// redirect response, body and all, with no error.
@@ -238,6 +240,12 @@ func redirectPolicy(req *http.Request, via []*http.Request) error {
 	// Record the hop for Result.Redirects (req is the upcoming request).
 	if chain, ok := req.Context().Value(redirectChainKey{}).(*[]string); ok {
 		*chain = append(*chain, req.URL.String())
+	}
+	// net/http has already set Referer to the previous URL, query string
+	// included, so a ?api_key= would reach the next origin. A Referer the user
+	// set on the original request is theirs to keep, like any custom header.
+	if via[0].Header.Get("Referer") == "" {
+		req.Header.Del("Referer")
 	}
 	if keepsCredentials(via[0].URL, req.URL) {
 		return nil
@@ -414,7 +422,8 @@ func (c *Client) Do(spec RequestSpec) Result {
 //
 // Header prefills are skipped when spec.HeadersResolved is set — the user has
 // already seen (and possibly deleted) them in the form, and a deleted auth
-// header must stay deleted. URL resolution always applies.
+// header must stay deleted. Such a spec carries the form's own envHeaderKeys,
+// which pass through untouched. URL resolution always applies.
 //
 // Each header actually injected here is recorded in spec.envHeaderKeys so
 // redirectPolicy strips exactly those on a cross-origin hop — a user-supplied

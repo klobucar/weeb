@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +187,79 @@ func TestSpecFromFormMarksHeadersResolved(t *testing.T) {
 	}
 	if got := resolveSpec(spec); len(got.Headers) != 0 {
 		t.Errorf("deleted auth header came back at send time: %+v", got.Headers)
+	}
+}
+
+// The TUI sends a resolved spec, so resolveSpec never records which form rows
+// came from WEEB_HEADERS; specFromForm must, or a prefilled API key follows a
+// cross-origin redirect. A prefill whose value the user edited is theirs and
+// follows like any typed header.
+func TestSendCmdStripsEnvHeadersCrossOrigin(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "X-Api-Key:env-secret;X-Env-Only:sekrit")
+	t.Setenv("WEEB_TOKEN", "")
+
+	var gotKey, gotEnvOnly string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("X-Api-Key")
+		gotEnvOnly = r.Header.Get("X-Env-Only")
+	}))
+	defer target.Close()
+	// A second loopback server has a different port: a different origin.
+	hopper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer hopper.Close()
+
+	// Exactly what ctrl+s does: the env-prefilled form -> sendCmd.
+	m := testModel()
+	m.url.SetValue(hopper.URL)
+	if res := Result(m.sendCmd()().(resultMsg)); !res.OK() {
+		t.Fatalf("request failed: %v", res.Err)
+	}
+	if gotKey != "" || gotEnvOnly != "" {
+		t.Errorf("env prefills followed a cross-origin redirect: X-Api-Key=%q X-Env-Only=%q", gotKey, gotEnvOnly)
+	}
+
+	m.headers[0].val.SetValue("mine") // the user edits the X-Api-Key prefill
+	if res := Result(m.sendCmd()().(resultMsg)); !res.OK() {
+		t.Fatalf("request failed: %v", res.Err)
+	}
+	if gotKey != "mine" {
+		t.Errorf("user-edited X-Api-Key should survive the redirect, got %q", gotKey)
+	}
+	if gotEnvOnly != "" {
+		t.Errorf("env prefill X-Env-Only followed a cross-origin redirect: %q", gotEnvOnly)
+	}
+}
+
+func TestSendCmdKeepsEnvHeadersSameOrigin(t *testing.T) {
+	t.Setenv("WEEB_BASE_URL", "")
+	t.Setenv("WEEB_HEADERS", "X-Api-Key:sekrit")
+	t.Setenv("WEEB_TOKEN", "tok")
+
+	var gotAuth, gotKey string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/final", http.StatusFound)
+	})
+	mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotKey = r.Header.Get("X-Api-Key")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	m := testModel()
+	m.url.SetValue(srv.URL + "/start")
+	if res := Result(m.sendCmd()().(resultMsg)); !res.OK() {
+		t.Fatalf("request failed: %v", res.Err)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Errorf("same-origin redirect should keep Authorization, got %q", gotAuth)
+	}
+	if gotKey != "sekrit" {
+		t.Errorf("same-origin redirect should keep env-prefilled X-Api-Key, got %q", gotKey)
 	}
 }
 

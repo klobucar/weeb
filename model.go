@@ -96,6 +96,11 @@ type model struct {
 	headers []headerRow
 	body    textarea.Model
 
+	// envHeaders holds the (lowercased key, value) pairs prefilled into the
+	// header rows from WEEB_HEADERS/WEEB_TOKEN, so specFromForm can tell an
+	// untouched env credential from a header the user typed or edited.
+	envHeaders map[Header]bool
+
 	resp      viewport.Model
 	debugView viewport.Model
 	spinner   spinner.Model
@@ -141,12 +146,15 @@ func newModel(client *Client, logger *log.Logger, dbg *safeBuffer) model {
 	// Prefill header rows from the env so the defaults are visible in the form.
 	var rows []headerRow
 	have := map[string]bool{}
+	envHeaders := map[Header]bool{}
 	for _, h := range parseHeaderList(os.Getenv("WEEB_HEADERS")) {
 		rows = append(rows, newHeaderRow(h.Key, h.Value))
 		have[strings.ToLower(h.Key)] = true
+		envHeaders[Header{Key: strings.ToLower(h.Key), Value: h.Value}] = true
 	}
 	if tok := os.Getenv("WEEB_TOKEN"); tok != "" && !have["authorization"] {
 		rows = append(rows, newHeaderRow("Authorization", "Bearer "+tok))
+		envHeaders[Header{Key: "authorization", Value: "Bearer " + tok}] = true
 	}
 	if len(rows) == 0 {
 		rows = append(rows, newHeaderRow("", ""))
@@ -161,6 +169,7 @@ func newModel(client *Client, logger *log.Logger, dbg *safeBuffer) model {
 		methods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"},
 		url:         url,
 		headers:     rows,
+		envHeaders:  envHeaders,
 		body:        body,
 		resp:        viewport.New(),
 		debugView:   viewport.New(),
@@ -560,12 +569,19 @@ func (m *model) onMethodChange() {
 
 func (m model) specFromForm() RequestSpec {
 	var hs []Header
+	var envKeys []string
 	for _, r := range m.headers {
 		k := strings.TrimSpace(r.key.Value())
 		if k == "" {
 			continue
 		}
 		hs = append(hs, Header{Key: k, Value: r.val.Value()})
+		// resolveSpec skips a resolved spec's headers, so it can't record
+		// which came from the env; a row still holding its env prefill is
+		// that ambient credential and must not follow a cross-origin redirect.
+		if lk := strings.ToLower(k); m.envHeaders[Header{Key: lk, Value: r.val.Value()}] {
+			envKeys = append(envKeys, lk)
+		}
 	}
 	var body []byte
 	if m.bodyEnabled() {
@@ -581,6 +597,7 @@ func (m model) specFromForm() RequestSpec {
 		// The form rows started from the env prefills, so they are the user's
 		// final say — a deleted Authorization row must not be re-injected.
 		HeadersResolved: true,
+		envHeaderKeys:   envKeys,
 	}
 }
 
