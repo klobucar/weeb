@@ -264,12 +264,38 @@ weeb cert example.com --pem > chain.pem
 | `--tls VERSION` | Pin the handshake to `1.0`/`1.1`/`1.2`/`1.3` |
 | `--client-cert F` · `--client-key F` | Present a client certificate for mTLS (aliases `--cert`/`--key`) |
 | `--timeout DUR` | Dial timeout (default 30s) |
+| `-f, --file PATH` | Read certificates from a local PEM/DER file (`-` = stdin) instead of dialing |
+| `--host NAME` | With a file: also check the leaf against this hostname (`--sni` works too) |
 
 The exit code is non-zero when the chain is untrusted (unless `-k`) or expired,
 so `weeb cert` doubles as a cron/monitoring check. In the TUI, `ctrl+t` inspects
 the cert of the URL you're pointed at — the report folds like a response, so each
 cert in the chain is a collapsible section (the leaf shows on load; the CA certs
 above it start folded — `←`/`→` to select, `enter` to open, `±` for all).
+
+### Certificate files
+
+`weeb cert` reads local certificates too, as a friendlier `openssl x509 -text`:
+
+```sh
+weeb cert ./chain.pem                     # PEM, any number of certs in any order
+weeb cert server.der                      # or DER
+cat chain.pem | weeb cert -               # or stdin
+weeb cert server.crt --host example.com   # also check the leaf against a name
+weeb cert bundle.pem --check -w 30 -c 14  # the same expiry check as a live host
+```
+
+An argument is read as a file when it's `-`, or when it exists and has a `/`
+or a `.pem`/`.crt`/`.cer`/`.der` extension. A bare `example.com` is always
+dialed, even if a file by that name exists; use `-f example.com` to read it.
+weeb orders the certs leaf → root by issuer and verifies the leaf against
+the system roots, with the file's other certs as intermediates. Without
+`--host` there's no hostname check. The report, `--json`, `--pem`, `--brief`,
+`--check` and the exit codes work as for a live host. Handshake details
+(protocol, cipher, ALPN, OCSP stapling, SCTs) are left out because a file
+doesn't have them. Other PEM blocks, such as a private key in a bundle, are
+skipped and never printed. A certificate Go can't parse (a few legacy CA
+roots) is skipped with a note rather than failing the whole file.
 
 ## Monitoring (`--check`)
 
