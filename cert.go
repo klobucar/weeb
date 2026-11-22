@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"image/color"
 	"math"
@@ -155,10 +156,21 @@ func fetchCertReport(target string, opts certOptions) (*certReport, error) {
 	return rep, nil
 }
 
+// STARTTLS reply limits. The plaintext exchange runs before any certificate is
+// checked, so the server is untrusted, and the only other bound is the dial
+// deadline: an endless reply line, or endless continuation lines, would be
+// buffered in full until it fires. Real replies are tiny — RFC 5321 caps an
+// SMTP reply line at 512 octets, and a long EHLO lists a few dozen extensions.
+const (
+	starttlsMaxLine  = 4 << 10 // bytes per reply line, line ending included
+	starttlsMaxLines = 100     // lines per multiline reply or untagged IMAP run
+)
+
 // startTLS performs the plaintext command exchange that upgrades a connection to
 // TLS for the named application protocol, mirroring `openssl s_client -starttls`.
 func startTLS(conn net.Conn, proto string) error {
-	br := bufio.NewReader(conn)
+	// Sized to the line cap so readReplyLine's ReadSlice never buffers past it.
+	br := bufio.NewReaderSize(conn, starttlsMaxLine)
 	switch strings.ToLower(proto) {
 	case "smtp":
 		if err := expectCode(br, "220"); err != nil {
@@ -183,7 +195,7 @@ func startTLS(conn net.Conn, proto string) error {
 		}
 		return expectCode(br, "234")
 	case "imap":
-		if _, err := br.ReadString('\n'); err != nil { // untagged greeting
+		if _, err := readReplyLine(br); err != nil { // untagged greeting
 			return err
 		}
 		if _, err := fmt.Fprintf(conn, "a STARTTLS\r\n"); err != nil {
@@ -203,15 +215,29 @@ func startTLS(conn net.Conn, proto string) error {
 	}
 }
 
+// readReplyLine reads one reply line without its line ending, failing on a line
+// longer than starttlsMaxLine instead of buffering it. ReadSlice reports such a
+// line as ErrBufferFull when br is sized to the cap (see startTLS); the length
+// check keeps the limit exact for a larger reader.
+func readReplyLine(br *bufio.Reader) (string, error) {
+	line, err := br.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) || len(line) > starttlsMaxLine {
+		return "", fmt.Errorf("starttls: reply line longer than %d bytes", starttlsMaxLine)
+	}
+	if err != nil {
+		return "", fmt.Errorf("starttls: %w", err)
+	}
+	return strings.TrimRight(string(line), "\r\n"), nil
+}
+
 // expectCode reads a (possibly multiline) numeric reply (SMTP/FTP style) and
 // fails unless every line carries the wanted status code.
 func expectCode(br *bufio.Reader, code string) error {
-	for {
-		line, err := br.ReadString('\n')
+	for range starttlsMaxLines {
+		line, err := readReplyLine(br)
 		if err != nil {
-			return fmt.Errorf("starttls: %w", err)
+			return err
 		}
-		line = strings.TrimRight(line, "\r\n")
 		if len(line) < 3 || line[:3] != code {
 			return fmt.Errorf("starttls: wanted %s, got %q", code, line)
 		}
@@ -219,17 +245,17 @@ func expectCode(br *bufio.Reader, code string) error {
 			return nil
 		}
 	}
+	return fmt.Errorf("starttls: %s reply ran past %d lines", code, starttlsMaxLines)
 }
 
 // expectTagged reads an IMAP response, skipping untagged lines, and requires the
 // tagged completion to be OK.
 func expectTagged(br *bufio.Reader, tag string) error {
-	for {
-		line, err := br.ReadString('\n')
+	for range starttlsMaxLines {
+		line, err := readReplyLine(br)
 		if err != nil {
-			return fmt.Errorf("starttls: %w", err)
+			return err
 		}
-		line = strings.TrimRight(line, "\r\n")
 		if strings.HasPrefix(line, tag+" ") {
 			if strings.HasPrefix(line, tag+" OK") {
 				return nil
@@ -237,15 +263,15 @@ func expectTagged(br *bufio.Reader, tag string) error {
 			return fmt.Errorf("starttls: imap: %q", line)
 		}
 	}
+	return fmt.Errorf("starttls: imap: no tagged reply within %d lines", starttlsMaxLines)
 }
 
 // expectPrefix reads one line and requires it to start with prefix (POP3 +OK).
 func expectPrefix(br *bufio.Reader, prefix string) error {
-	line, err := br.ReadString('\n')
+	line, err := readReplyLine(br)
 	if err != nil {
-		return fmt.Errorf("starttls: %w", err)
+		return err
 	}
-	line = strings.TrimRight(line, "\r\n")
 	if !strings.HasPrefix(line, prefix) {
 		return fmt.Errorf("starttls: wanted %s, got %q", prefix, line)
 	}

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -274,6 +275,89 @@ func TestStartTLSErrors(t *testing.T) {
 		t.Error("a non-220 greeting should error")
 	}
 	c2.Close()
+}
+
+// The STARTTLS exchange runs before any certificate check, so the server is
+// untrusted. An endless reply line, or an endless run of continuation/untagged
+// lines, must fail at a fixed cap instead of being buffered until the deadline
+// (one 128 MiB greeting line used to cost ~260 MiB). net.Pipe is synchronous,
+// so the bytes the server got written are exactly the bytes weeb read.
+func TestStartTLSCapsReplySize(t *testing.T) {
+	flood := func(c net.Conn, sent *atomic.Int64, head, unit string) {
+		fmt.Fprint(c, head)
+		b := []byte(unit)
+		for {
+			n, err := c.Write(b)
+			sent.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	}
+	long := strings.Repeat("A", 1<<10)
+	cases := []struct {
+		name, proto, want string
+		serve             func(*bufio.Reader, net.Conn, *atomic.Int64)
+	}{
+		{"smtp endless greeting line", "smtp", "longer than", func(r *bufio.Reader, c net.Conn, s *atomic.Int64) {
+			flood(c, s, "220", long)
+		}},
+		{"smtp endless EHLO lines", "smtp", "lines", func(r *bufio.Reader, c net.Conn, s *atomic.Int64) {
+			fmt.Fprint(c, "220 mx ready\r\n")
+			_, _ = r.ReadString('\n') // EHLO
+			flood(c, s, "", "250-EXT\r\n")
+		}},
+		{"ftp endless greeting lines", "ftp", "lines", func(r *bufio.Reader, c net.Conn, s *atomic.Int64) {
+			flood(c, s, "", "220-hello\r\n")
+		}},
+		{"imap endless greeting line", "imap", "longer than", func(r *bufio.Reader, c net.Conn, s *atomic.Int64) {
+			flood(c, s, "* OK ", long)
+		}},
+		{"imap endless untagged lines", "imap", "lines", func(r *bufio.Reader, c net.Conn, s *atomic.Int64) {
+			fmt.Fprint(c, "* OK ready\r\n")
+			_, _ = r.ReadString('\n') // a STARTTLS
+			flood(c, s, "", "* CAPABILITY x\r\n")
+		}},
+		{"pop3 endless greeting line", "pop3", "longer than", func(r *bufio.Reader, c net.Conn, s *atomic.Int64) {
+			flood(c, s, "+OK ", long)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			var sent atomic.Int64
+			go func() {
+				defer server.Close()
+				tc.serve(bufio.NewReader(server), server, &sent)
+			}()
+			_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+			err := startTLS(client, tc.proto)
+			client.Close()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("startTLS(%s) err = %v, want the %q cap error", tc.proto, err, tc.want)
+			}
+			if n := sent.Load(); n > 64<<10 {
+				t.Errorf("read %d bytes of an endless reply before giving up", n)
+			}
+		})
+	}
+
+	// Replies right at both caps still upgrade.
+	client, server := net.Pipe()
+	go func() {
+		defer server.Close()
+		r := bufio.NewReader(server)
+		fmt.Fprint(server, "220 "+strings.Repeat("A", starttlsMaxLine-len("220 \r\n"))+"\r\n")
+		_, _ = r.ReadString('\n') // EHLO
+		fmt.Fprint(server, strings.Repeat("250-EXT\r\n", starttlsMaxLines-1)+"250 STARTTLS\r\n")
+		_, _ = r.ReadString('\n') // STARTTLS
+		fmt.Fprint(server, "220 go ahead\r\n")
+	}()
+	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+	if err := startTLS(client, "smtp"); err != nil {
+		t.Errorf("replies at the caps should pass: %v", err)
+	}
+	client.Close()
 }
 
 // A self-signed peer controls every string in its certificate — Subject and
