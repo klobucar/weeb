@@ -323,6 +323,11 @@ func (c *Client) Do(spec RequestSpec) Result {
 	if spec.NoFollow {
 		ctx = context.WithValue(ctx, noFollowKey{}, true)
 	}
+	// History is recorded after the fact: deferred here — past the build
+	// errors, so only requests that were actually attempted leave an entry —
+	// and the closure sees the final res (status, duration) on every return
+	// path below. Best-effort by construction; recordHistory never fails Do.
+	defer func() { c.recordHistory(spec, res) }()
 
 	tr := &reqTrace{}
 	req = req.WithContext(httptrace.WithClientTrace(ctx, tr.clientTrace()))

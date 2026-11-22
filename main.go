@@ -61,6 +61,8 @@ func main() {
 		os.Exit(runCurlImport(args[1:]))
 	case "completion":
 		os.Exit(runCompletion(args[1:], os.Stdout))
+	case "history":
+		os.Exit(runHistory(args[1:]))
 	}
 
 	parsed, err := parseCLI(args)
@@ -835,6 +837,7 @@ USAGE
   weeb cert HOST [opts]      inspect a TLS certificate / chain
   weeb curl '<curl cmd>'     run a pasted curl command (import)
   weeb completion zsh|bash   print shell completion script
+  weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
   weeb version               print the build version
 
   METHOD defaults to GET. A URL opens the interactive builder, BUT weeb runs a
@@ -961,6 +964,10 @@ ENVIRONMENT (prefills, applied unless you override them)
   WEEB_PRETTY      pretty body view; on by default, set 0/false for raw (toggle: ctrl+p)
   WEEB_MAX_BODY    cap for buffered bodies, e.g. 256m (default 64m, 0 = no cap;
                    --max-body wins; piped/-o bodies are never capped)
+  WEEB_HISTORY     request history for 'weeb history' (weeb/history.jsonl in the
+                   user cache dir); on by default, set 0/false to disable.
+                   Credential header values are never stored (redacted; replay
+                   re-applies them from WEEB_TOKEN/WEEB_HEADERS)
 
 LOGGING (structured diagnostics; never on stdout)
   WEEB_LOG         debug|info|warn|error|off        (default: warn)

@@ -120,18 +120,30 @@ func newLogger(mode runMode) (*log.Logger, *safeBuffer, func()) {
 	return logger, dbg, cleanup
 }
 
+// weebCacheDir returns the private per-user weeb dir under the OS cache dir,
+// created 0700. Both the TUI log and the request history live here — logged
+// URLs and request metadata are sensitive, so the dir is never group/world
+// readable.
+func weebCacheDir() (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(cache, "weeb")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // defaultLogPath is the TUI log location: a 0700 dir under the per-user cache
 // dir. The old default — the shared OS temp dir — left request URLs (which can
 // carry tokens in query strings) world-readable on multi-user systems and let
 // another user pre-create /tmp/weeb.log as a symlink for weeb to append
 // through. The temp dir remains only as a last-resort fallback.
 func defaultLogPath() string {
-	cache, err := os.UserCacheDir()
+	dir, err := weebCacheDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "weeb.log")
-	}
-	dir := filepath.Join(cache, "weeb")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return filepath.Join(os.TempDir(), "weeb.log")
 	}
 	return filepath.Join(dir, "weeb.log")
