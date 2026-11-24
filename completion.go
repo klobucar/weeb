@@ -13,7 +13,7 @@ import (
 // a subcommand or flag is added (to main's dispatch, parseCLI, or runCert),
 // extend the matching slice here and every shell picks it up.
 var (
-	completionSubcommands = []string{"cert", "curl", "completion", "history", "view", "audit", "version", "help", "run"}
+	completionSubcommands = []string{"cert", "curl", "completion", "history", "view", "audit", "probe", "version", "help", "run"}
 	completionMethods     = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 	// Flags of a plain `weeb [METHOD] URL …` invocation (see parseCLI).
 	completionMainFlags = []string{
@@ -42,7 +42,9 @@ var (
 	completionAuditFlags = []string{
 		"-H", "--header", "--timeout", "--json", "--check", "--nagios", "--persona",
 	}
-	completionPersonas = []string{"plain", "dere", "tsun", "yan"}
+	// Flags accepted after `weeb probe` (see runProbe).
+	completionProbeFlags = append([]string{"-k", "--insecure"}, completionAuditFlags...)
+	completionPersonas   = []string{"plain", "dere", "tsun", "yan"}
 )
 
 // runCompletion handles `weeb completion zsh|bash|fish`: print a static
@@ -76,7 +78,7 @@ func zshCompletion() string {
 # The command/flag lists are emitted from completion.go; update them there.
 
 _weeb() {
-  local -a subcmds methods mainflags certflags personas auditflags
+  local -a subcmds methods mainflags certflags personas auditflags probeflags
   subcmds=(%[1]s)
   methods=(%[2]s)
   mainflags=(%[3]s)
@@ -85,6 +87,7 @@ _weeb() {
   local -a viewflags
   viewflags=(%[6]s)
   auditflags=(%[7]s)
+  probeflags=(%[8]s)
 
   # Flags whose value we can complete.
   case "${words[CURRENT-1]}" in
@@ -105,6 +108,7 @@ _weeb() {
   case "${words[2]}" in
     cert|tls)   _arguments $certflags '*:host:_hosts' ;;
     audit)      _arguments $auditflags '*:url:_urls' ;;
+    probe)      _arguments $probeflags '*:host:_hosts' ;;
     completion) (( CURRENT == 3 )) && compadd zsh bash fish ;;
     run)        _files -g '*.http' ;;
     view)       _arguments $viewflags '*:file:_files' ;;
@@ -122,6 +126,7 @@ _weeb "$@"
 		strings.Join(completionPersonas, " "),
 		strings.Join(completionViewFlags, " "),
 		strings.Join(completionAuditFlags, " "),
+		strings.Join(completionProbeFlags, " "),
 	)
 }
 
@@ -142,6 +147,7 @@ _weeb() {
   local personas="%[5]s"
   local viewflags="%[6]s"
   local auditflags="%[7]s"
+  local probeflags="%[8]s"
 
   # Flags whose value we can complete.
   case "$prev" in
@@ -164,6 +170,7 @@ _weeb() {
   case "${COMP_WORDS[1]}" in
     cert|tls)   COMPREPLY=($(compgen -W "$certflags" -- "$cur")) ;;
     audit)      COMPREPLY=($(compgen -W "$auditflags" -- "$cur")) ;;
+    probe)      COMPREPLY=($(compgen -W "$probeflags" -- "$cur")) ;;
     completion) COMPREPLY=($(compgen -W "zsh bash fish" -- "$cur")) ;;
     run)        COMPREPLY=($(compgen -f -X '!*.http' -- "$cur") $(compgen -d -- "$cur")) ;;
     view)       COMPREPLY=($(compgen -W "$viewflags" -- "$cur") $(compgen -f -- "$cur")) ;;
@@ -181,6 +188,7 @@ complete -F _weeb weeb
 		strings.Join(completionPersonas, " "),
 		strings.Join(completionViewFlags, " "),
 		strings.Join(completionAuditFlags, " "),
+		strings.Join(completionProbeFlags, " "),
 	)
 }
 
@@ -223,6 +231,8 @@ end
 	b.WriteString("complete -c weeb -n '__fish_seen_subcommand_from run' -F\n")
 	b.WriteString("\n# Flags of `weeb audit URL`.\n")
 	writeFishFlags(&b, "__fish_seen_subcommand_from audit", completionAuditFlags)
+	b.WriteString("\n# Flags of `weeb probe HOST`.\n")
+	writeFishFlags(&b, "__fish_seen_subcommand_from probe", completionProbeFlags)
 	return b.String()
 }
 
