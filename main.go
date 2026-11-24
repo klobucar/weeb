@@ -96,7 +96,14 @@ func main() {
 // the binary — the module version for `go install pkg@vX`, or the VCS revision
 // (short) when built from a checkout — so the output is still meaningful.
 func printVersion(w io.Writer) {
-	v, c := version, commit
+	v, c := buildVersion()
+	fmt.Fprintf(w, "weeb %s (commit %s, built %s)\n", v, c, date)
+}
+
+// buildVersion is the version and short commit this binary was built from:
+// the GoReleaser ldflags, else what Go embedded, else "dev" and "none".
+func buildVersion() (v, c string) {
+	v, c = version, commit
 	if v == "dev" || c == "none" {
 		if info, ok := debug.ReadBuildInfo(); ok {
 			if v == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
@@ -109,7 +116,7 @@ func printVersion(w io.Writer) {
 			}
 		}
 	}
-	fmt.Fprintf(w, "weeb %s (commit %s, built %s)\n", v, c, date)
+	return v, c
 }
 
 // headless reports whether a parsed request should run as a one-shot CLI rather
@@ -1051,7 +1058,9 @@ USAGE
   so it pipes into jq); errors and logs go to stderr (or a log file).
 
 OPTIONS
-  -H, --header "K: V"   add a request header (repeatable)
+  -H, --header "K: V"   add a request header (repeatable). weeb sends
+                        "User-Agent: weeb/VERSION" unless you set one;
+                        -H "User-Agent:" sends none
   -d, --data DATA       request body; DATA may be:
                           @file   read the file
                           -, @-   read stdin

@@ -24,7 +24,7 @@ printf '%s\n' '{"name":"weeb"}' | weeb POST https://api.example.com/users \
 
 | Option | Effect |
 | --- | --- |
-| `-H, --header 'Name: value'` | Add a request header. Repeat for multiple headers. |
+| `-H, --header 'Name: value'` | Add a request header. Repeat for multiple headers. Requests send `User-Agent: weeb/VERSION` unless you set your own. Pass `-H 'User-Agent:'` to send no User-Agent. |
 | `-d, --data DATA` | Send a literal string, load a body from `@file`, or read stdin with `-` or `@-`. A pipe on stdin supplies the body when this option is omitted. |
 | `-X, --request METHOD` | Set the HTTP method explicitly. |
 | `--timeout DURATION` | Set a timeout such as `500ms` or `10s`. The 30-second default covers the entire buffered request or the wait for headers on a streamed request. An explicit timeout also bounds the streamed transfer. For [event streams](#event-streams), it acts as an idle timeout. |
