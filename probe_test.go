@@ -125,7 +125,7 @@ func probeServers(t *testing.T, tlsCfg *tls.Config, plain http.HandlerFunc) prob
 	})
 	sec := httptest.NewUnstartedServer(page)
 	sec.TLS = tlsCfg
-	sec.EnableHTTP2 = tlsCfg.CipherSuites == nil // HTTP/2 refuses the CBC-only legacy suites
+	sec.EnableHTTP2 = tlsCfg.CipherSuites == nil        // HTTP/2 refuses the CBC-only legacy suites
 	sec.Config.ErrorLog = stdlog.New(io.Discard, "", 0) // the probe's rejected handshakes are the point
 	sec.StartTLS()
 	t.Cleanup(sec.Close)
