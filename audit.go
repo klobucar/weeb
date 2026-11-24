@@ -648,12 +648,7 @@ func auditBanner(h http.Header) auditFinding {
 // its reason per row, then the tally. color=false gives the same layout as
 // plain text, for pipes and NO_COLOR.
 func renderAudit(rep auditReport, st styles, color bool) string {
-	paint := func(s lipgloss.Style, text string) string {
-		if !color {
-			return text
-		}
-		return s.Render(text)
-	}
+	paint := auditPainter(color)
 	var b strings.Builder
 	head := fmt.Sprintf("%d %s", rep.Status, http.StatusText(rep.Status))
 	fmt.Fprintf(&b, "%s  %s  %s\n", paint(st.paneTitle, "Security headers"), rep.URL,
@@ -664,63 +659,103 @@ func renderAudit(rep auditReport, st styles, color bool) string {
 			auditPlural(hops, "redirect", "redirects"), strings.Join(rep.Redirects, " → "))))
 	}
 	b.WriteString("\n")
-
-	width := 0
-	for _, f := range rep.Findings {
-		width = max(width, len(f.Name))
-	}
-	badges := [...]struct {
-		label string
-		col   lipgloss.Style
-	}{
-		gradePass: {"✔ PASS", lipgloss.NewStyle().Bold(true).Foreground(cGreen)},
-		gradeWarn: {"! WARN", lipgloss.NewStyle().Bold(true).Foreground(cOrange)},
-		gradeFail: {"✘ FAIL", lipgloss.NewStyle().Bold(true).Foreground(cRed)},
-	}
-	for _, f := range rep.Findings {
-		bd := badges[f.Grade]
-		fmt.Fprintf(&b, "  %s  %s  %s\n", paint(bd.col, bd.label),
-			paint(st.headerKey, fmt.Sprintf("%-*s", width, f.Name)), f.Reason)
-	}
-
-	b.WriteString("\n  ")
-	b.WriteString(strings.Join([]string{
-		paint(badges[gradePass].col, fmt.Sprintf("%d pass", rep.Pass)),
-		paint(badges[gradeWarn].col, fmt.Sprintf("%d warn", rep.Warn)),
-		paint(badges[gradeFail].col, fmt.Sprintf("%d fail", rep.Fail)),
-	}, paint(st.meta, " · ")))
+	writeAuditRows(&b, rep.Findings, auditNameWidth(rep.Findings), st, paint)
 	b.WriteString("\n")
+	writeAuditTally(&b, rep.Pass, rep.Warn, rep.Fail, st, paint)
 	return b.String()
 }
 
-// checkAudit turns a report into a plugin verdict: any fail is CRITICAL, any
-// warn WARNING. The message names the failing checks first, then the warning
-// ones, each with its reason. line() runs the message through checkSafe.
-func checkAudit(rep auditReport) checkVerdict {
-	perf := fmt.Sprintf("pass=%d warn=%d fail=%d", rep.Pass, rep.Warn, rep.Fail)
-	metrics := map[string]any{
-		"pass": rep.Pass, "warn": rep.Warn, "fail": rep.Fail, "http_status": rep.Status,
+// auditPainter styles text when color is on and passes it through otherwise.
+func auditPainter(color bool) func(lipgloss.Style, string) string {
+	return func(s lipgloss.Style, text string) string {
+		if !color {
+			return text
+		}
+		return s.Render(text)
 	}
+}
+
+// auditBadges is each grade's label and color in a report table.
+var auditBadges = [...]struct {
+	label string
+	col   lipgloss.Style
+}{
+	gradePass: {"✔ PASS", lipgloss.NewStyle().Bold(true).Foreground(cGreen)},
+	gradeWarn: {"! WARN", lipgloss.NewStyle().Bold(true).Foreground(cOrange)},
+	gradeFail: {"✘ FAIL", lipgloss.NewStyle().Bold(true).Foreground(cRed)},
+}
+
+// auditNameWidth is the widest check name in runes, so rows align.
+func auditNameWidth(findings []auditFinding) int {
+	width := 0
+	for _, f := range findings {
+		width = max(width, len([]rune(f.Name)))
+	}
+	return width
+}
+
+// writeAuditRows writes one "badge  name  reason" row per finding, the name
+// padded to width runes.
+func writeAuditRows(b *strings.Builder, findings []auditFinding, width int, st styles, paint func(lipgloss.Style, string) string) {
+	for _, f := range findings {
+		bd := auditBadges[f.Grade]
+		name := f.Name + strings.Repeat(" ", max(0, width-len([]rune(f.Name))))
+		fmt.Fprintf(b, "  %s  %s  %s\n", paint(bd.col, bd.label), paint(st.headerKey, name), f.Reason)
+	}
+}
+
+// writeAuditTally writes the "N pass · N warn · N fail" footer line.
+func writeAuditTally(b *strings.Builder, pass, warn, fail int, st styles, paint func(lipgloss.Style, string) string) {
+	b.WriteString("  ")
+	b.WriteString(strings.Join([]string{
+		paint(auditBadges[gradePass].col, fmt.Sprintf("%d pass", pass)),
+		paint(auditBadges[gradeWarn].col, fmt.Sprintf("%d warn", warn)),
+		paint(auditBadges[gradeFail].col, fmt.Sprintf("%d fail", fail)),
+	}, paint(st.meta, " · ")))
+	b.WriteString("\n")
+}
+
+// checkAudit turns a report into a plugin verdict (see checkFindings).
+func checkAudit(rep auditReport) checkVerdict {
+	return checkFindings("audit", rep.Findings, map[string]any{"http_status": rep.Status})
+}
+
+// checkFindings grades findings as a plugin verdict for check: any fail is
+// CRITICAL, any warn WARNING. The message names the failing checks first,
+// then the warning ones, each with its reason; line() runs it through
+// checkSafe. metrics gains the pass/warn/fail counts, which are also the
+// perfdata.
+func checkFindings(check string, findings []auditFinding, metrics map[string]any) checkVerdict {
+	var count [len(auditGradeNames)]int
+	for _, f := range findings {
+		count[f.Grade]++
+	}
+	pass, warn, fail := count[gradePass], count[gradeWarn], count[gradeFail]
+	perf := fmt.Sprintf("pass=%d warn=%d fail=%d", pass, warn, fail)
+	if metrics == nil {
+		metrics = map[string]any{}
+	}
+	metrics["pass"], metrics["warn"], metrics["fail"] = pass, warn, fail
 	code := checkOK
 	switch {
-	case rep.Fail > 0:
+	case fail > 0:
 		code = checkCritical
-	case rep.Warn > 0:
+	case warn > 0:
 		code = checkWarning
 	}
-	msg := fmt.Sprintf("all %d checks pass", len(rep.Findings))
+	msg := fmt.Sprintf("all %d checks pass", len(findings))
 	if code != checkOK {
 		var parts []string
 		for _, g := range []auditGrade{gradeFail, gradeWarn} {
-			for _, f := range rep.Findings {
+			for _, f := range findings {
 				if f.Grade == g {
 					parts = append(parts, f.Name+" ("+f.Reason+")")
 				}
 			}
 		}
-		msg = fmt.Sprintf("%d fail, %d warn: %s", rep.Fail, rep.Warn, strings.Join(parts, "; "))
+		msg = fmt.Sprintf("%d fail, %d warn: %s", fail, warn, strings.Join(parts, "; "))
 	}
-	return newCheckVerdict("audit", code, msg, perf, metrics)
+	return newCheckVerdict(check, code, msg, perf, metrics)
 }
 
 // ---- command ----------------------------------------------------------------

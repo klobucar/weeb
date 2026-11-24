@@ -2,7 +2,7 @@
 
 [Back to weeb](../README.md)
 
-Add `--check` (alias `--nagios`) to an HTTP request, `weeb cert`, or `weeb audit` to use it as a monitoring plugin with tools such as Nagios and Icinga. The default format is a single verdict line on stdout, such as `HTTP OK - message|perfdata`. The exit code carries the same verdict.
+Add `--check` (alias `--nagios`) to an HTTP request, `weeb cert`, `weeb audit`, or `weeb probe` to use it as a monitoring plugin with tools such as Nagios and Icinga. The default format is a single verdict line on stdout, such as `HTTP OK - message|perfdata`. The exit code carries the same verdict.
 
 | Exit code | Verdict |
 | --- | --- |
@@ -70,7 +70,7 @@ weeb https://api.example.com/health --check --json -w 500ms
 weeb cert example.com --check --json
 ```
 
-The object contains `check` (`http`, `cert`, or `audit`), `status`, `code`, and `message`. When measurements are available, `metrics` contains values such as `time_ms`, `size_bytes`, or `days_until_expiry`. HTTP checks also report their outcomes in `assertions`, with each expected condition, pass or fail, and the observed value when available. For the chain, SANs, fingerprints, and other certificate details, run `weeb cert HOST --json`.
+The object contains `check` (`http`, `cert`, `audit`, or `probe`), `status`, `code`, and `message`. When measurements are available, `metrics` contains values such as `time_ms`, `size_bytes`, or `days_until_expiry`. HTTP checks also report their outcomes in `assertions`, with each expected condition, pass or fail, and the observed value when available. For the chain, SANs, fingerprints, and other certificate details, run `weeb cert HOST --json`.
 
 
 ## Latency benchmarks
@@ -124,3 +124,37 @@ The audit exits 0 when the report is available and 1 when the fetch fails. With 
 | Info leaks | no version in `Server` | a version in `Server` or any `X-Powered-By`/`X-AspNet-Version` | |
 
 HSTS preload is optional. When a response sends multiple enforced CSP policies, a CSP weakness counts only if all of the policies allow it.
+
+## Site probes
+
+`weeb probe` reports on a site's whole transport security in one run. It accepts a bare host, `host:port`, or a URL.
+
+```sh
+weeb probe example.com
+weeb probe example.com --check
+weeb probe https://example.com:8443/login --json | jq '.sections[].findings[] | select(.grade != "pass")'
+```
+
+The report has three sections:
+
+| Section | Checks |
+| --- | --- |
+| TLS | One handshake pinned to each of TLS 1.0, 1.1, 1.2, and 1.3. One offering only RC4 and 3DES suites, and one offering only static-RSA key exchange. The certificate's trust, hostname, and expiry. |
+| Plain HTTP | Walks the `http://` URL one redirect at a time until it reaches `https://`. |
+| Security headers | Fetches the `https://` URL and applies the `weeb audit` checks. |
+
+| Check | Pass | Warn | Fail |
+| --- | --- | --- | --- |
+| TLS 1.0, TLS 1.1 | not offered | no answer | offered (deprecated by RFC 8996) |
+| TLS 1.2 | offered, or absent when TLS 1.3 is offered | no answer | absent along with TLS 1.3 |
+| TLS 1.3 | offered | absent or no answer | |
+| Weak ciphers | RC4 and 3DES rejected | no answer | an RC4 or 3DES suite accepted |
+| Forward secrecy | static RSA rejected | a `TLS_RSA_*` suite accepted | |
+| Certificate | trusted, 30 days or more left | under 30 days left | untrusted, wrong host, expired, or under 14 days left |
+| HTTPS redirect | 301 or 308 to https on the same host, or nothing answers on plain http | temporary redirect, or the first hop goes to another host | content served over plain http, or redirects never reach https |
+
+The probe can only test what Go's TLS client can offer, so it doesn't detect SSLv3, export, NULL, or DHE suites. A port in the argument applies to its scheme (https for a bare host), and the other scheme keeps its default port. All handshakes and requests run concurrently. `--timeout` (default 10s) bounds each one.
+
+The plain-http walk sends no headers. The https fetch sends only the `-H` headers you pass, never `WEEB_TOKEN` or `WEEB_HEADERS`. If the certificate is untrusted, the headers aren't graded unless you pass `-k`, and the Certificate check fails either way.
+
+The probe exits 0 once the report is printed and 1 when neither https nor http answers. With `--check`, a fail is CRITICAL, a warning is WARNING, and an unreachable host is UNKNOWN. The verdict's metrics include `days_until_expiry` and `http_status` when available.

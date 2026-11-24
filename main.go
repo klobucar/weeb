@@ -63,6 +63,8 @@ func main() {
 		os.Exit(runHistory(args[1:]))
 	case "audit":
 		os.Exit(runAudit(args[1:]))
+	case "probe":
+		os.Exit(runProbe(args[1:]))
 	case "run":
 		os.Exit(runHTTPFile(args[1:]))
 	case "view":
@@ -1037,6 +1039,7 @@ USAGE
   weeb completion SHELL      print shell completion script (zsh|bash|fish)
   weeb history [N|--clear]   list recent requests / re-run entry N / wipe history
   weeb audit URL [opts]      grade a page's security headers
+  weeb probe HOST [opts]     report on TLS versions, ciphers, cert, http→https, headers
   weeb run FILE [NAME|N]     list the requests in a .http file / run one
   weeb view [FILE|-] [opts]  browse a JSON/XML/HTML/YAML/Markdown file, foldable
   weeb version               print the build version
@@ -1225,6 +1228,23 @@ AUDIT OPTIONS (weeb audit URL)  — grade a page's security headers
       --check           monitoring-plugin mode: one "AUDIT WARNING - ..." line;
                         any fail is CRITICAL, any warn WARNING (alias --nagios)
       --persona MODE    error voice for fetch failures (see --persona above)
+
+PROBE OPTIONS (weeb probe HOST|URL)  — a site's whole transport security
+  One report: which TLS versions (1.0-1.3) the server accepts, whether it
+  takes RC4/3DES or static-RSA (no forward secrecy) suites, the certificate's
+  trust and expiry, whether plain http redirects permanently to https on the
+  same host, and the security headers 'weeb audit' grades. A port belongs to
+  the URL's scheme (https for a bare host); the other scheme keeps 80/443.
+  Exits 0 once reported (1 if neither https nor http answers).
+  -H, --header "K: V"   header for the https page fetch (repeatable); plain
+                        http gets none, and WEEB_TOKEN/WEEB_HEADERS never go
+  -k, --insecure        grade the headers even when the certificate is
+                        untrusted (the Certificate check still fails)
+      --timeout DUR     per handshake / request timeout (default 10s)
+      --json            emit the report as JSON; with --check, the verdict
+      --check           monitoring-plugin mode: one "PROBE WARNING - ..." line;
+                        any fail is CRITICAL, any warn WARNING (alias --nagios)
+      --persona MODE    error voice when the host is unreachable
 VIEW (weeb view [FILE|-])  — a local jless/fx, using the response pane
   Reads FILE, or stdin when FILE is - or omitted. At a terminal it opens the
   pretty, foldable viewer: the response-pane keys plus ctrl+p pretty/raw,
@@ -1260,6 +1280,8 @@ EXAMPLES
   weeb https://api.example.com/health --repeat 50 --fresh --json | jq .phases.tls
   weeb audit example.com
   weeb audit https://example.com/login --check
+  weeb probe example.com
+  weeb probe example.com --json | jq '.sections[].findings[] | select(.grade != "pass")'
   weeb https://api.example.com/health --check --expect-json '.status == "ok"' --expect-header '!X-Debug'
   weeb view data.json
   kubectl get pod web -o yaml | weeb view --type yaml
