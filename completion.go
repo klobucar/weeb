@@ -40,7 +40,7 @@ var (
 	}
 	// Flags accepted after `weeb audit` (see runAudit).
 	completionAuditFlags = []string{
-		"-H", "--header", "--timeout", "--json", "--check", "--nagios", "--persona",
+		"-H", "--header", "--timeout", "--json", "--check", "--nagios", "--persona", "--fix",
 	}
 	// Flags accepted after `weeb probe` (see runProbe).
 	completionProbeFlags = append([]string{"-k", "--insecure"}, completionAuditFlags...)

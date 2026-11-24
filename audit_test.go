@@ -197,7 +197,7 @@ func TestAuditHostileHeaderValues(t *testing.T) {
 	rep := newAuditReport(res)
 
 	var tty strings.Builder
-	fmt.Fprint(sanitizingWriter{w: &tty}, renderAudit(rep, newStyles(), true))
+	fmt.Fprint(sanitizingWriter{w: &tty}, renderAudit(rep, newStyles(), true, true))
 	if strings.Contains(tty.String(), "]52;") || strings.Contains(tty.String(), "\x9b") {
 		t.Errorf("control sequence reached the terminal:\n%q", tty.String())
 	}
@@ -256,7 +256,7 @@ func TestRenderAuditPlain(t *testing.T) {
 		Redirects: []string{"http://a.example/", "https://a.example/"},
 		Headers:   auditHdr("X-Content-Type-Options", "nosniff"),
 	})
-	out := renderAudit(rep, newStyles(), false)
+	out := renderAudit(rep, newStyles(), false, false)
 	if strings.Contains(out, "\x1b") {
 		t.Errorf("plain render has ANSI:\n%q", out)
 	}

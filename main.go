@@ -1227,6 +1227,7 @@ AUDIT OPTIONS (weeb audit URL)  — grade a page's security headers
                         object ({check, status, code, message, metrics})
       --check           monitoring-plugin mode: one "AUDIT WARNING - ..." line;
                         any fail is CRITICAL, any warn WARNING (alias --nagios)
+      --fix             show a one-line fix under each warning and failure
       --persona MODE    error voice for fetch failures (see --persona above)
 
 PROBE OPTIONS (weeb probe HOST|URL)  — a site's whole transport security
@@ -1235,11 +1236,14 @@ PROBE OPTIONS (weeb probe HOST|URL)  — a site's whole transport security
   trust and expiry, whether plain http redirects permanently to https on the
   same host, and the security headers 'weeb audit' grades. A port belongs to
   the URL's scheme (https for a bare host); the other scheme keeps 80/443.
-  Exits 0 once reported (1 if neither https nor http answers).
+  In the TUI, ctrl+l probes the URL's host (f there shows the fixes). Exits 0
+  once reported (1 if neither https nor http answers).
   -H, --header "K: V"   header for the https page fetch (repeatable); plain
                         http gets none, and WEEB_TOKEN/WEEB_HEADERS never go
   -k, --insecure        grade the headers even when the certificate is
                         untrusted (the Certificate check still fails)
+      --fix             show a one-line fix under each warning and failure
+                        (--json always carries them as "fix")
       --timeout DUR     per handshake / request timeout (default 10s)
       --json            emit the report as JSON; with --check, the verdict
       --check           monitoring-plugin mode: one "PROBE WARNING - ..." line;
@@ -1280,7 +1284,7 @@ EXAMPLES
   weeb https://api.example.com/health --repeat 50 --fresh --json | jq .phases.tls
   weeb audit example.com
   weeb audit https://example.com/login --check
-  weeb probe example.com
+  weeb probe example.com --fix
   weeb probe example.com --json | jq '.sections[].findings[] | select(.grade != "pass")'
   weeb https://api.example.com/health --check --expect-json '.status == "ok"' --expect-header '!X-Debug'
   weeb view data.json
@@ -1289,7 +1293,8 @@ EXAMPLES
 
 TUI KEYS
   tab/shift+tab/↑↓ move between fields · ←→ pick method · ctrl+o/ctrl+r add/del header
-  ctrl+s send · esc stop a request/stream · ctrl+t inspect TLS cert · ctrl+x export as curl
+  ctrl+s send · esc stop a request/stream · ctrl+t inspect TLS cert · ctrl+l probe the host
+  ctrl+x export as curl
   ctrl+p pretty · ctrl+y 🌈 · ctrl+g debug
   in the response pane: ↑↓ scroll · ←→ select section or node (JSON/XML/HTML/YAML) · enter fold · -/+ fold all
   y copy the node's path (jq/XPath) · Y copy its value · ctrl+x also copies the curl (clipboard via OSC 52)

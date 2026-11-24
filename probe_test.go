@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/log/v2"
 )
 
@@ -228,7 +229,7 @@ func TestProbeModernServer(t *testing.T) {
 		t.Errorf("default handshake = %+v, want TLS 1.3 + h2", rep.Conn)
 	}
 
-	out := renderProbe(rep, newStyles(), false)
+	out := renderProbe(rep, newStyles(), false, false)
 	for _, s := range []string{"Probe  127.0.0.1", "TLS  " + tg.addr, "✔ PASS  TLS 1.0 ", "✘ FAIL  HTTPS redirect", "Plain HTTP  " + tg.httpURL} {
 		if !strings.Contains(out, s) {
 			t.Errorf("render missing %q:\n%s", s, out)
@@ -289,4 +290,102 @@ func TestCompletionProbeFlags(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Every non-passing check carries a fix; passing ones and "no answer" don't.
+func TestProbeAndAuditFixes(t *testing.T) {
+	for _, f := range auditHeaders(auditHdr(), true) {
+		if (f.Grade == gradePass) != (f.Fix == "") {
+			t.Errorf("%s: grade %s, fix %q", f.ID, f.Grade, f.Fix)
+		}
+	}
+	if f := auditFindingByID(t, auditHdr("X-Content-Type-Options", "nosniff"), true, "nosniff"); f.Fix != "" {
+		t.Errorf("passing nosniff has fix %q", f.Fix)
+	}
+	if f := probeVersionFinding(probeProtocol{Version: "TLS 1.0", Offered: true}, nil); !strings.Contains(f.Fix, "TLS 1.2 the minimum") {
+		t.Errorf("tls1.0 fix = %q", f.Fix)
+	}
+	if f := probeVersionFinding(probeProtocol{Version: "TLS 1.0", unsure: true}, nil); f.Fix != "" {
+		t.Errorf("unsure tls1.0 has fix %q", f.Fix)
+	}
+	hops := []probeHop{{URL: "http://example.com/", Status: 302, Location: "https://example.com/"}}
+	if f := probeRedirectFinding(hops, "example.com"); !strings.Contains(f.Fix, "301") {
+		t.Errorf("302 fix = %q", f.Fix)
+	}
+
+	rep := newAuditReport(Result{URL: "https://a.example/", Status: 200, Headers: auditHdr()})
+	if out := renderAudit(rep, newStyles(), false, true); !strings.Contains(out, "fix: send Strict-Transport-Security: max-age=31536000") {
+		t.Errorf("--fix render has no HSTS fix line:\n%s", out)
+	}
+	if out := renderAudit(rep, newStyles(), false, false); strings.Contains(out, "fix:") {
+		t.Errorf("default render shows fixes:\n%s", out)
+	}
+}
+
+// ctrl+l probes the URL in the form and shows the report in the response
+// pane as foldable sections; ctrl+l again returns to the response.
+func TestProbePane(t *testing.T) {
+	var m tea.Model = testModel()
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 70})
+
+	next, cmd := m.Update(kp("ctrl+l"))
+	if !next.(model).inFlight || cmd == nil {
+		t.Fatal("ctrl+l should start a probe")
+	}
+
+	rep := probeReport{
+		Host: "example.com", Address: "example.com:443",
+		Conn: &probeConn{Version: "TLS 1.3", Cipher: "TLS_AES_128_GCM_SHA256", ALPN: "h2"},
+		Sections: []probeSection{
+			{Name: "TLS", Detail: "example.com:443", Findings: []auditFinding{
+				probeVersionFinding(probeProtocol{Version: "TLS 1.0", Offered: true}, nil),
+				probeVersionFinding(probeProtocol{Version: "TLS 1.3", Offered: true, Cipher: "TLS_AES_128_GCM_SHA256"}, nil),
+			}},
+			{Name: "Plain HTTP", Detail: "http://example.com/", Findings: []auditFinding{
+				probeRedirectFinding([]probeHop{{URL: "http://example.com/", Status: 301, Location: "https://example.com/"}}, "example.com"),
+			}},
+		},
+	}
+	rep.tally()
+	m = send(t, next, probeMsg{rep: rep})
+	mm := m.(model)
+	if mm.inFlight || mm.pane != paneProbe || len(mm.respSections) != 2 {
+		t.Fatalf("inFlight=%v pane=%v sections=%d", mm.inFlight, mm.pane, len(mm.respSections))
+	}
+	out := m.View().Content
+	for _, want := range []string{"Probe  example.com", "TLS 1.3 · TLS_AES_128_GCM_SHA256 · ALPN h2", "1 fail", "all pass", "FAIL", "f show fixes"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("probe pane missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "TLS 1.2 the minimum") {
+		t.Errorf("fixes should start hidden:\n%s", out)
+	}
+
+	// f in the focused probe pane shows the fixes, and again hides them.
+	var fm tea.Model = focusResponse(m.(model))
+	fm = send(t, fm, kp("f"))
+	if out := probePaneText(fm); !strings.Contains(out, "TLS 1.2 the minimum") {
+		t.Errorf("f should show fixes:\n%s", out)
+	}
+	fm = send(t, fm, kp("f"))
+	if out := probePaneText(fm); strings.Contains(out, "TLS 1.2 the minimum") {
+		t.Errorf("second f should hide fixes:\n%s", out)
+	}
+
+	m = send(t, m, kp("ctrl+l"))
+	if m.(model).pane != paneResponse {
+		t.Errorf("second ctrl+l should return to the response, pane = %v", m.(model).pane)
+	}
+
+	m = send(t, m, probeMsg{err: errProbeUnreachable})
+	if out := m.View().Content; !strings.Contains(out, "Probe") || !strings.Contains(out, "unreachable") {
+		t.Errorf("error pane:\n%s", out)
+	}
+}
+
+// probePaneText is the response pane's content, fixes and all.
+func probePaneText(m tea.Model) string {
+	mm := m.(model)
+	return mm.composeResponse()
 }

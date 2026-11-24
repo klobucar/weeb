@@ -33,6 +33,7 @@ weeb uses the response's content type to identify the format. For generic conten
 | **Ctrl+S** | Send the request |
 | **Esc** | Stop the request or stream in progress |
 | **Ctrl+T** | [Inspect the TLS certificate chain](tls.md) for the current URL |
+| **Ctrl+L** | [Probe the current URL's host](monitoring.md#site-probes): TLS versions, ciphers, certificate, http→https redirect, and security headers. Press **F** in the focused report to show or hide fixes, and **Ctrl+L** again to return to the response |
 | **Ctrl+X** | Show and copy the equivalent curl command |
 | **y / Shift+Y** | Copy the selected path or value when the response pane has focus |
 | **Ctrl+P** | Toggle the formatted body view |
