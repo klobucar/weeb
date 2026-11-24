@@ -8,7 +8,7 @@
 [![Latest release](https://img.shields.io/github/v/release/klobucar/weeb)](https://github.com/klobucar/weeb/releases/latest)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-weeb is a terminal HTTP client. Build requests and browse responses in an interactive interface, or pipe the response body into tools like `jq`. You can paste a curl command, inspect a TLS certificate chain, or check an endpoint from a monitoring job.
+weeb is a terminal HTTP client. Build requests and browse responses in an interactive interface, or pipe the response body into tools like `jq`. You can paste a curl command, inspect a TLS certificate chain, probe a site's security, or check an endpoint from a monitoring job.
 
 ## Install
 
@@ -37,6 +37,16 @@ weeb https://api.example.com/me | jq .
 weeb https://example.com --no-tui
 ```
 
+## Probe a site's security
+
+```sh
+weeb probe example.com --fix
+```
+
+One report covers the TLS versions and cipher suites the server accepts, its certificate, whether plain http redirects to https, and its security headers. Add `--fix` to show a one-line fix under each warning and failure. In the interactive interface, press **Ctrl+L** to probe the current URL's host. Add `--json` for scripts or `--check` for monitoring.
+
+![Probing example.com: TLS versions, ciphers, certificate, the http to https redirect, and security headers, each with a fix](assets/probe.gif)
+
 ## Documentation
 
 | Guide | Covers |
@@ -45,7 +55,7 @@ weeb https://example.com --no-tui
 | [Interactive interface](docs/tui.md) | Editing requests, folding responses, and keyboard shortcuts |
 | [Request files](docs/request-files.md) | Running `.http` files, file variables, and environments |
 | [TLS certificates](docs/tls.md) | Certificate chains, STARTTLS, SNI, mutual TLS, and PEM export |
-| [Monitoring](docs/monitoring.md) | HTTP and certificate checks, thresholds, exit codes, and JSON verdicts |
+| [Monitoring](docs/monitoring.md) | HTTP and certificate checks, security header audits, site probes, thresholds, exit codes, and JSON verdicts |
 | [Configuration](docs/configuration.md) | Environment variables, default headers, error personas, and logging |
 
 Run `weeb --help` for the command-line reference. If you downloaded a release archive, find the guides in the [GitHub repository](https://github.com/klobucar/weeb).

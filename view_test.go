@@ -259,7 +259,7 @@ func TestViewerModel(t *testing.T) {
 	}
 
 	// Request-form actions do nothing and focus never leaves the pane.
-	for _, k := range []string{"ctrl+s", "ctrl+t", "ctrl+x", "ctrl+o", "tab", "shift+tab", "up", "down"} {
+	for _, k := range []string{"ctrl+s", "ctrl+t", "ctrl+l", "ctrl+x", "ctrl+o", "tab", "shift+tab", "up", "down"} {
 		next, cmd := m.Update(kp(k))
 		mm := next.(model)
 		if mm.inFlight || mm.pane != paneResponse || mm.currentFocus().kind != focResponse {

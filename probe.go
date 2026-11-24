@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"charm.land/log/v2"
 )
 
 // `weeb probe HOST` is a one-shot transport-security report for a site. It
@@ -363,10 +365,12 @@ func (r *probeReport) tlsSection(run probeTLSRun, host string) probeSection {
 	}
 	sec.Findings = append(sec.Findings,
 		probeSuiteFinding("weak_ciphers", "Weak ciphers", run.weak, gradeFail,
-			"accepts %s, a broken cipher", "rejects RC4 and 3DES"),
+			"accepts %s, a broken cipher", "rejects RC4 and 3DES",
+			"remove every RC4 and 3DES suite; offer ECDHE with AES-GCM or ChaCha20-Poly1305"),
 		probeSuiteFinding("forward_secrecy", "Forward secrecy", run.staticRSA, gradeWarn,
 			"accepts %s: static RSA key exchange, so a stolen key decrypts recorded traffic",
-			"rejects static RSA key exchange"),
+			"rejects static RSA key exchange",
+			"remove the TLS_RSA_* suites so every handshake uses ECDHE"),
 	)
 	cert, leaf := probeCertFinding(chain, host)
 	r.Certificate = leaf
@@ -385,6 +389,7 @@ func probeVersionFinding(p probeProtocol, offered map[uint16]bool) auditFinding 
 	case p.Version == "TLS 1.0" || p.Version == "TLS 1.1":
 		if p.Offered {
 			f.Grade, f.Reason = gradeFail, "offered, but deprecated since 2021 (RFC 8996)"
+			f.Fix = "turn off TLS 1.0 and 1.1: make TLS 1.2 the minimum (nginx: ssl_protocols TLSv1.2 TLSv1.3)"
 		} else {
 			f.Reason = "not offered"
 		}
@@ -394,20 +399,22 @@ func probeVersionFinding(p probeProtocol, offered map[uint16]bool) auditFinding 
 		f.Reason = "not offered; TLS 1.3 only"
 	case p.Version == "TLS 1.2":
 		f.Grade, f.Reason = gradeFail, "not offered, and neither is TLS 1.3"
+		f.Fix = "turn on TLS 1.2 and 1.3"
 	default: // TLS 1.3
 		f.Grade, f.Reason = gradeWarn, "not offered"
+		f.Fix = "turn on TLS 1.3 (nginx: ssl_protocols TLSv1.2 TLSv1.3); it needs OpenSSL 1.1.1 or later"
 	}
 	return f
 }
 
 // probeSuiteFinding grades a handshake that offered only suites the server
 // should refuse: completing it earns bad, with badFmt naming the suite.
-func probeSuiteFinding(id, name string, a probeAttempt, bad auditGrade, badFmt, ok string) auditFinding {
+func probeSuiteFinding(id, name string, a probeAttempt, bad auditGrade, badFmt, ok, fix string) auditFinding {
 	f := auditFinding{ID: id, Name: name}
 	switch {
 	case a.ok():
 		suite := tls.CipherSuiteName(a.state.CipherSuite)
-		f.Grade, f.Reason, f.Value = bad, fmt.Sprintf(badFmt, suite), suite
+		f.Grade, f.Reason, f.Value, f.Fix = bad, fmt.Sprintf(badFmt, suite), suite, fix
 	case !a.dialed || probeUnsure(a.err):
 		f.Grade, f.Reason = gradeWarn, "no answer: "+probeClean(errString(a.err))
 	default:
@@ -428,15 +435,18 @@ func probeCertFinding(chain []*x509.Certificate, host string) (auditFinding, *ce
 	f.Value = leaf.name()
 	trusted, verr := verifyChain(host, chain)
 	days := leaf.DaysUntilExpiry
+	const renew = "renew the certificate, and automate renewal (ACME, e.g. Let's Encrypt) so it can't lapse"
 	switch {
 	case days < 0:
-		f.Grade, f.Reason = gradeFail, "expired "+auditPlural(-days, "day", "days")+" ago"
+		f.Grade, f.Reason, f.Fix = gradeFail, "expired "+auditPlural(-days, "day", "days")+" ago", renew
 	case !trusted:
 		f.Grade, f.Reason = gradeFail, "untrusted: "+probeClean(verr)
+		f.Fix = "serve a certificate from a public CA that names " + auditShow(host) +
+			", with its intermediates (the full chain, not just the leaf)"
 	case days < probeCertCritDays:
-		f.Grade, f.Reason = gradeFail, "expires in "+auditPlural(days, "day", "days")
+		f.Grade, f.Reason, f.Fix = gradeFail, "expires in "+auditPlural(days, "day", "days"), renew
 	case days < probeCertWarnDays:
-		f.Grade, f.Reason = gradeWarn, "expires in "+auditPlural(days, "day", "days")
+		f.Grade, f.Reason, f.Fix = gradeWarn, "expires in "+auditPlural(days, "day", "days"), renew
 	default:
 		f.Reason = "trusted, expires in " + auditPlural(days, "day", "days")
 		if leaf.IssuerCN != "" {
@@ -510,6 +520,7 @@ func probeRedirectFinding(hops []probeHop, host string) auditFinding {
 	lastURL, _ := url.Parse(last.Location)
 	if last.Location == "" || lastURL == nil || !strings.EqualFold(lastURL.Scheme, "https") {
 		f.Grade = gradeFail
+		f.Fix = "answer every plain-http request with a 301 to the same host and path on https"
 		switch {
 		case len(hops) == 1 && first.Location == "" && first.Error == "":
 			f.Reason = fmt.Sprintf("serves %d over plain http instead of redirecting to https", first.Status)
@@ -530,11 +541,13 @@ func probeRedirectFinding(hops []probeHop, host string) auditFinding {
 		f.Grade = gradeWarn
 		f.Reason = "first redirect goes to " + auditShow(first.Location) +
 			", not https on the same host, so browsers can't pick up HSTS for it"
+		f.Fix = "redirect http://" + host + " to https://" + host + " first, and only then elsewhere"
 	case first.Status == http.StatusMovedPermanently || first.Status == http.StatusPermanentRedirect:
 		f.Reason = fmt.Sprintf("%d to %s", first.Status, auditShow(first.Location))
 	default:
 		f.Grade = gradeWarn
 		f.Reason = fmt.Sprintf("%d is temporary; 301 or 308 lets browsers remember the upgrade", first.Status)
+		f.Fix = "make the http→https redirect a 301 (or 308)"
 	}
 	return f
 }
@@ -620,29 +633,64 @@ func probe(t probeTargets, o probeOptions, client *Client) (probeReport, error) 
 
 // ---- rendering --------------------------------------------------------------
 
+// probeConnLine is the one-line summary of the default handshake: version,
+// cipher, ALPN, stapling and the leaf's name. Empty when it failed.
+func probeConnLine(rep probeReport) string {
+	c := rep.Conn
+	if c == nil {
+		return ""
+	}
+	parts := []string{c.Version, c.Cipher}
+	if c.ALPN != "" {
+		parts = append(parts, "ALPN "+c.ALPN)
+	}
+	if c.OCSPStapled {
+		parts = append(parts, "OCSP stapled")
+	}
+	if l := rep.Certificate; l != nil {
+		parts = append(parts, checkSafe(l.name()))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// probeTally counts a section's non-passing findings for a fold summary:
+// "2 fail · 1 warn", or "all pass".
+func probeTally(findings []auditFinding) string {
+	var warn, fail int
+	for _, f := range findings {
+		switch f.Grade {
+		case gradeWarn:
+			warn++
+		case gradeFail:
+			fail++
+		}
+	}
+	var parts []string
+	if fail > 0 {
+		parts = append(parts, fmt.Sprintf("%d fail", fail))
+	}
+	if warn > 0 {
+		parts = append(parts, fmt.Sprintf("%d warn", warn))
+	}
+	if len(parts) == 0 {
+		return "all pass"
+	}
+	return strings.Join(parts, " · ")
+}
+
 // renderProbe draws the report: a summary of the default handshake, then
 // each section's rows under its heading, then the tally.
-func renderProbe(rep probeReport, st styles, color bool) string {
+func renderProbe(rep probeReport, st styles, color, fix bool) string {
 	paint := auditPainter(color)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s  %s\n", paint(st.paneTitle, "Probe"), rep.Host)
-	if c := rep.Conn; c != nil {
-		parts := []string{c.Version, c.Cipher}
-		if c.ALPN != "" {
-			parts = append(parts, "ALPN "+c.ALPN)
-		}
-		if c.OCSPStapled {
-			parts = append(parts, "OCSP stapled")
-		}
-		if l := rep.Certificate; l != nil {
-			parts = append(parts, checkSafe(l.name()))
-		}
-		fmt.Fprintln(&b, paint(st.meta, strings.Join(parts, " · ")))
+	if line := probeConnLine(rep); line != "" {
+		fmt.Fprintln(&b, paint(st.meta, line))
 	}
 	width := auditNameWidth(rep.findings())
 	for _, s := range rep.Sections {
 		fmt.Fprintf(&b, "\n%s  %s\n", paint(st.headerKey, s.Name), paint(st.meta, s.Detail))
-		writeAuditRows(&b, s.Findings, width, st, paint)
+		writeAuditRows(&b, s.Findings, width, fix, st, paint)
 	}
 	b.WriteString("\n")
 	writeAuditTally(&b, rep.Pass, rep.Warn, rep.Fail, st, paint)
@@ -661,15 +709,25 @@ func checkProbe(rep probeReport) checkVerdict {
 	return checkFindings("probe", rep.findings(), metrics)
 }
 
+// newProbeClient is the Client a probe sends its requests through: timeout
+// per request, and no history, since a probe's requests would crowd out the
+// ones the user actually made.
+func newProbeClient(logger *log.Logger, voice ErrorChan, timeout time.Duration) *Client {
+	c := newClient(logger, voice)
+	c.SetTimeout(timeout)
+	c.noHistory = true
+	return c
+}
+
 // ---- command ----------------------------------------------------------------
 
-// runProbe handles `weeb probe HOST|URL [-H "K: V"]... [-k] [--timeout DUR]
-// [--json] [--check] [--persona MODE]`. Like audit it exits 0 once the
+// runProbe handles `weeb probe HOST|URL [-H "K: V"]... [-k] [--fix]
+// [--timeout DUR] [--json] [--check] [--persona MODE]`. Like audit it exits 0 once the
 // report is out, whatever the grades (--check is the graded mode), 1 when the
 // host is unreachable, and 2 on bad usage.
 func runProbe(args []string) int {
 	var target, persona string
-	var asJSON, checkMode bool
+	var asJSON, checkMode, showFix bool
 	o := probeOptions{timeout: probeDefaultTimeout}
 
 	usage := func(err error) int {
@@ -683,6 +741,8 @@ func runProbe(args []string) int {
 			asJSON = true
 		case arg == "--check" || arg == "--nagios":
 			checkMode = true
+		case arg == "--fix":
+			showFix = true
 		case arg == "-k" || arg == "--insecure":
 			o.insecure = true
 		case arg == "-H" || arg == "--header":
@@ -738,12 +798,9 @@ func runProbe(args []string) int {
 	logger, _, cleanup := newLogger(modeCLI)
 	defer cleanup()
 	voice := errorChanFor(personaMode)
-	client := newClient(logger, voice)
-	client.SetTimeout(o.timeout)
-	client.noHistory = true // a dozen probe requests would crowd out real history
 	logger.Info("probe", "host", t.host, "addr", t.addr)
 
-	rep, err := probe(t, o, client)
+	rep, err := probe(t, o, newProbeClient(logger, voice, o.timeout))
 	if err != nil {
 		logger.Error("probe failed", "kind", KindTransport.String(), "err", err)
 		if checkMode {
@@ -761,8 +818,7 @@ func runProbe(args []string) int {
 		out, _ := json.MarshalIndent(rep, "", "  ")
 		fmt.Fprintln(outW, string(out))
 	default:
-		color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
-		fmt.Fprint(outW, renderProbe(rep, newStyles(), color))
+		fmt.Fprint(outW, ttyWrap(renderProbe(rep, newStyles(), auditColor(), showFix)))
 	}
 	return 0
 }

@@ -315,7 +315,7 @@ func (m *model) viewerKey(msg tea.KeyPressMsg) (cmd tea.Cmd, ok bool) {
 		m.pretty = !m.pretty
 		m.renderView()
 		return nil, true
-	case key.Matches(msg, m.keys.Send, m.keys.InspectCert, m.keys.ExportCurl,
+	case key.Matches(msg, m.keys.Send, m.keys.InspectCert, m.keys.Probe, m.keys.ExportCurl,
 		m.keys.NextField, m.keys.PrevField, m.keys.AddHeader, m.keys.DelHeader,
 		m.keys.ToggleDebug):
 		return nil, true // request-form actions: nothing to act on here

@@ -27,6 +27,12 @@ type certMsg struct {
 	err error
 }
 
+// probeMsg carries a finished `weeb probe` run back into the event loop.
+type probeMsg struct {
+	rep probeReport
+	err error
+}
+
 // frameMsg drives the animated rainbow. It fires on a steady tick so the colors
 // keep flowing regardless of user input.
 type frameMsg struct{}
@@ -42,6 +48,7 @@ const (
 	paneResponse paneView = iota
 	paneCert
 	paneCurl
+	paneProbe
 )
 
 // focusKind enumerates the kinds of focusable widgets in the form.
@@ -140,6 +147,11 @@ type model struct {
 	respErr      string
 	respCursor   int
 	foldState    map[string]bool
+
+	// lastProbe is the probe report on show, kept so f can redraw it with
+	// or without fixes; probeFixes is that toggle (off, as in the CLI).
+	lastProbe  *probeMsg
+	probeFixes bool
 
 	// status is a transient message shown in place of the key help (e.g.
 	// "copied curl to clipboard"); statusSeq pairs it with its clear timer.
@@ -306,6 +318,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderCert(msg)
 		return m, nil
 
+	case probeMsg:
+		m.inFlight = false
+		m.renderProbe(msg)
+		return m, nil
+
 	case statusClearMsg:
 		if msg.seq == m.statusSeq {
 			m.status = ""
@@ -372,6 +389,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inFlight = true
 			m.flightLabel = "inspecting TLS…"
 			return m, tea.Batch(m.certCmd(), m.spinner.Tick)
+
+		case key.Matches(msg, m.keys.Probe):
+			if m.inFlight {
+				return m, nil
+			}
+			if m.pane == paneProbe {
+				m.showResponse() // toggle back to the HTTP response view
+				return m, nil
+			}
+			m.inFlight = true
+			m.flightLabel = "probing TLS, http→https and headers…"
+			return m, tea.Batch(m.probeCmd(), m.spinner.Tick)
 
 		case key.Matches(msg, m.keys.ExportCurl):
 			if m.pane == paneCurl {
@@ -457,6 +486,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if key.Matches(msg, m.keys.CopyPath, m.keys.CopyValue) {
 				cmd := m.copySelection(key.Matches(msg, m.keys.CopyValue))
 				return m, cmd
+			}
+			if key.Matches(msg, m.keys.ToggleFixes) && m.pane == paneProbe && m.lastProbe != nil {
+				m.probeFixes = !m.probeFixes
+				y := m.resp.YOffset()
+				m.renderProbe(*m.lastProbe)
+				m.resp.SetYOffset(y)
+				return m, nil
 			}
 			// Fold controls take precedence over viewport scrolling, whenever the
 			// pane has foldable sections (HTTP response or the TLS cert view).
@@ -717,6 +753,31 @@ func (m model) certCmd() tea.Cmd {
 	}
 }
 
+// probeCmd runs `weeb probe` on the current URL's host (resolved against
+// WEEB_BASE_URL like a request), off the event loop, reporting via probeMsg.
+// Like the CLI it sends none of the form's headers: they may hold
+// WEEB_TOKEN, and the probe also talks plain http. A -k the TUI was started
+// with carries over to the header fetch, as it does for sends.
+func (m model) probeCmd() tea.Cmd {
+	target := resolveSpec(RequestSpec{URL: strings.TrimSpace(m.url.Value())}).URL
+	logger, voice, insecure := m.logger, m.client.voice, m.tlsOpts.Insecure
+	return func() tea.Msg {
+		t, err := probeTargetsFor(target)
+		if err != nil {
+			return probeMsg{err: err}
+		}
+		logger.Info("probe", "host", t.host, "addr", t.addr)
+		o := probeOptions{timeout: probeDefaultTimeout, insecure: insecure}
+		rep, err := probe(t, o, newProbeClient(logger, voice, o.timeout))
+		if err != nil {
+			logger.Error("probe failed", "kind", KindTransport.String(), "err", err)
+		} else {
+			logger.Info("probe ok", "pass", rep.Pass, "warn", rep.Warn, "fail", rep.Fail)
+		}
+		return probeMsg{rep: rep, err: err}
+	}
+}
+
 // ---- layout ----------------------------------------------------------------
 
 func (m *model) layout() {
@@ -947,7 +1008,7 @@ func (m model) renderHelpLine() string {
 	}
 
 	pairs := [][2]string{
-		{"ctrl+s", "send"}, {"ctrl+t", "cert"}, {"ctrl+x", "curl"}, {"ctrl+p", "pretty"},
+		{"ctrl+s", "send"}, {"ctrl+t", "cert"}, {"ctrl+l", "probe"}, {"ctrl+x", "curl"}, {"ctrl+p", "pretty"},
 		{"ctrl+y", "🌈"}, {"ctrl+g", "debug"}, {"ctrl+c", "quit"},
 	}
 	sep := m.styles.hint.Render("  ·  ")
@@ -1028,7 +1089,7 @@ func (m model) emptyState() string {
 		m.styles.hint.Render("compose a request above, then"),
 		m.styles.keycap.Render("ctrl+s")+m.styles.hint.Render("  to send"),
 		"",
-		m.styles.hint.Render("ctrl+t cert · ctrl+p pretty · ctrl+y 🌈"),
+		m.styles.hint.Render("ctrl+t cert · ctrl+l probe · ctrl+p pretty · ctrl+y 🌈"),
 	)
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, lines)
 }
@@ -1122,6 +1183,52 @@ func (m *model) renderCert(msg certMsg) {
 	m.respHeading = fmt.Sprintf("🔒 TLS  %s:%s", msg.rep.Host, msg.rep.Port)
 	for _, s := range certSections(msg.rep, m.styles, true, m.resp.Width(), true) {
 		m.addSectionDefault(s.title, s.summary, s.body, s.defaultFold)
+	}
+	if m.respCursor >= len(m.foldTargets()) {
+		m.respCursor = 0
+	}
+	m.setResp(m.composeResponse())
+	m.resp.GotoTop()
+}
+
+// renderProbe fills the response viewport with a probe report (or the
+// errorchan voice when the host is unreachable). Each probe section becomes a
+// foldable section titled with its pass/warn/fail tally; the handshake
+// summary and the overall tally sit above them.
+func (m *model) renderProbe(msg probeMsg) {
+	m.pane = paneProbe
+	m.lastProbe = &msg
+	m.respPreamble = ""
+	m.respSections = nil
+	m.respErr = ""
+	if msg.err != nil {
+		m.respHeading = "🛡 Probe"
+		m.setResp(m.styles.errText.Render(m.client.voice.Render(KindTransport, 0, msg.err)))
+		m.resp.GotoTop()
+		return
+	}
+	rep := msg.rep
+	m.respHeading = "🛡 Probe  " + rep.Host
+	paint := auditPainter(true)
+	var pre strings.Builder
+	writeAuditTally(&pre, rep.Pass, rep.Warn, rep.Fail, m.styles, paint)
+	if line := probeConnLine(rep); line != "" {
+		pre.WriteString("  " + m.styles.meta.Render(line) + "\n")
+	}
+	fixHint := "f show fixes"
+	if m.probeFixes {
+		fixHint = "f hide fixes"
+	}
+	pre.WriteString("  " + m.styles.hint.Render(fixHint+" · ctrl+l back to the response") + "\n")
+	m.respPreamble = strings.TrimRight(pre.String(), "\n")
+	width := auditNameWidth(rep.findings())
+	for _, s := range rep.Sections {
+		var b strings.Builder
+		if s.Detail != "" {
+			b.WriteString(m.styles.meta.Render(s.Detail) + "\n")
+		}
+		writeAuditRows(&b, s.Findings, width, m.probeFixes, m.styles, paint)
+		m.addSection(s.Name, probeTally(s.Findings), strings.TrimRight(b.String(), "\n"))
 	}
 	if m.respCursor >= len(m.foldTargets()) {
 		m.respCursor = 0

@@ -14,6 +14,7 @@ type keyMap struct {
 	DelHeader     key.Binding
 	Send          key.Binding
 	InspectCert   key.Binding
+	Probe         key.Binding
 	ExportCurl    key.Binding
 	TogglePretty  key.Binding
 	ToggleDebug   key.Binding
@@ -33,6 +34,9 @@ type keyMap struct {
 	// Plain letters like the fold keys, so also live only in that pane.
 	CopyPath  key.Binding
 	CopyValue key.Binding
+
+	// ToggleFixes shows or hides each probe finding's fix (probe pane only).
+	ToggleFixes key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -45,6 +49,7 @@ func defaultKeyMap() keyMap {
 		DelHeader:     key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "remove header")),
 		Send:          key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "send")),
 		InspectCert:   key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "inspect TLS cert")),
+		Probe:         key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "probe TLS, http→https and headers")),
 		ExportCurl:    key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "export as curl")),
 		TogglePretty:  key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "pretty/sniff body")),
 		ToggleDebug:   key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "debug log")),
@@ -60,5 +65,7 @@ func defaultKeyMap() keyMap {
 
 		CopyPath:  key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy path")),
 		CopyValue: key.NewBinding(key.WithKeys("Y", "shift+y"), key.WithHelp("Y", "copy value")),
+
+		ToggleFixes: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "show/hide probe fixes")),
 	}
 }

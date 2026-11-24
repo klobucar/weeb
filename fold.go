@@ -390,9 +390,10 @@ func (m *model) composeResponse() string {
 // ---- fold cursor / toggles -------------------------------------------------
 
 // hasSections reports whether the pane currently shows foldable content — true
-// for both the HTTP response and the TLS cert view, which share the section model.
+// for the HTTP response, the TLS cert view and the probe report, which share
+// the section model.
 func (m *model) hasSections() bool {
-	return (m.pane == paneResponse || m.pane == paneCert) && len(m.respSections) > 0
+	return (m.pane == paneResponse || m.pane == paneCert || m.pane == paneProbe) && len(m.respSections) > 0
 }
 
 func (m *model) moveFoldCursor(dir int) {

@@ -153,6 +153,8 @@ The report has three sections:
 | Certificate | trusted, 30 days or more left | under 30 days left | untrusted, wrong host, expired, or under 14 days left |
 | HTTPS redirect | 301 or 308 to https on the same host, or nothing answers on plain http | temporary redirect, or the first hop goes to another host | content served over plain http, or redirects never reach https |
 
+Add `--fix` to show a one-line fix under each warning and failure. `weeb audit --fix` does the same for header checks. JSON reports always include fixes as `fix`. In the interactive interface, press **Ctrl+L** to probe the current URL's host. Each section folds. With the pane focused, press **F** to show or hide fixes, and press **Ctrl+L** again to return to the response.
+
 The probe can only test what Go's TLS client can offer, so it doesn't detect SSLv3, export, NULL, or DHE suites. A port in the argument applies to its scheme (https for a bare host), and the other scheme keeps its default port. All handshakes and requests run concurrently. `--timeout` (default 10s) bounds each one.
 
 The plain-http walk sends no headers. The https fetch sends only the `-H` headers you pass, never `WEEB_TOKEN` or `WEEB_HEADERS`. If the certificate is untrusted, the headers aren't graded unless you pass `-k`, and the Certificate check fails either way.

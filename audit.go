@@ -49,6 +49,7 @@ type auditFinding struct {
 	Grade  auditGrade `json:"grade"`
 	Reason string     `json:"reason"`
 	Value  string     `json:"value,omitempty"` // the header value(s) behind the grade
+	Fix    string     `json:"fix,omitempty"`   // one-line remedy, set when the grade isn't pass
 }
 
 // auditReport is the whole audit of one final response.
@@ -89,7 +90,7 @@ func newAuditReport(res Result) auditReport {
 // whether that response arrived over TLS.
 func auditHeaders(h http.Header, https bool) []auditFinding {
 	enforced := parseCSP(h.Values("Content-Security-Policy"))
-	return []auditFinding{
+	findings := []auditFinding{
 		auditHSTS(h, https),
 		auditCSP(h, enforced),
 		auditNosniff(h),
@@ -102,6 +103,29 @@ func auditHeaders(h http.Header, https bool) []auditFinding {
 		auditCORS(h),
 		auditBanner(h),
 	}
+	for i, f := range findings {
+		if f.Grade != gradePass {
+			findings[i].Fix = auditFixes[f.ID]
+		}
+	}
+	return findings
+}
+
+// auditFixes is the remedy shown under each header check that didn't pass.
+// One line per check covers every way it can fail, so each says what a
+// passing response sends rather than patching the specific complaint.
+var auditFixes = map[string]string{
+	"hsts":               "send Strict-Transport-Security: max-age=31536000; includeSubDomains on every https response",
+	"csp":                "send a Content-Security-Policy with script-src 'self' plus nonces or hashes; no 'unsafe-inline' or 'unsafe-eval'",
+	"nosniff":            "send X-Content-Type-Options: nosniff",
+	"clickjacking":       "send Content-Security-Policy: frame-ancestors 'self' (or 'none' if the page is never framed)",
+	"referrer_policy":    "send Referrer-Policy: strict-origin-when-cross-origin",
+	"permissions_policy": "send a Permissions-Policy that turns off unused features, e.g. camera=(), microphone=(), geolocation=()",
+	"coop":               "send Cross-Origin-Opener-Policy: same-origin",
+	"corp":               "send Cross-Origin-Resource-Policy: same-origin (or same-site)",
+	"cookies":            "set Secure, HttpOnly and SameSite=Lax (or Strict) on every cookie; leave out HttpOnly only for cookies script must read",
+	"cors":               "echo back only origins you trust in Access-Control-Allow-Origin; never * or null together with credentials",
+	"info_leak":          "drop X-Powered-By and the version from Server (nginx: server_tokens off; Apache: ServerTokens Prod)",
 }
 
 // auditNotes accumulates one check's problems: the grade is the worst one
@@ -647,7 +671,7 @@ func auditBanner(h http.Header) auditFinding {
 // renderAudit draws the report as a table: a grade badge, the check name and
 // its reason per row, then the tally. color=false gives the same layout as
 // plain text, for pipes and NO_COLOR.
-func renderAudit(rep auditReport, st styles, color bool) string {
+func renderAudit(rep auditReport, st styles, color, fix bool) string {
 	paint := auditPainter(color)
 	var b strings.Builder
 	head := fmt.Sprintf("%d %s", rep.Status, http.StatusText(rep.Status))
@@ -659,10 +683,24 @@ func renderAudit(rep auditReport, st styles, color bool) string {
 			auditPlural(hops, "redirect", "redirects"), strings.Join(rep.Redirects, " → "))))
 	}
 	b.WriteString("\n")
-	writeAuditRows(&b, rep.Findings, auditNameWidth(rep.Findings), st, paint)
+	writeAuditRows(&b, rep.Findings, auditNameWidth(rep.Findings), fix, st, paint)
 	b.WriteString("\n")
 	writeAuditTally(&b, rep.Pass, rep.Warn, rep.Fail, st, paint)
 	return b.String()
+}
+
+// auditColor is whether a report table is drawn in color: at a terminal,
+// unless NO_COLOR is set.
+func auditColor() bool { return stdoutIsTTY() && os.Getenv("NO_COLOR") == "" }
+
+// ttyWrap hang-wraps a report to the terminal's width at a TTY, so a long
+// reason or fix continues under its own column instead of at column 0.
+// Piped output is left alone: one line per row is easier to grep.
+func ttyWrap(s string) string {
+	if !stdoutIsTTY() {
+		return s
+	}
+	return wrapIndent(s, terminalWidth())
 }
 
 // auditPainter styles text when color is on and passes it through otherwise.
@@ -695,12 +733,17 @@ func auditNameWidth(findings []auditFinding) int {
 }
 
 // writeAuditRows writes one "badge  name  reason" row per finding, the name
-// padded to width runes.
-func writeAuditRows(b *strings.Builder, findings []auditFinding, width int, st styles, paint func(lipgloss.Style, string) string) {
+// padded to width runes. With fix, a finding that has one gets a "fix: …"
+// line under it, lined up with the reason.
+func writeAuditRows(b *strings.Builder, findings []auditFinding, width int, fix bool, st styles, paint func(lipgloss.Style, string) string) {
+	indent := strings.Repeat(" ", 2+len([]rune(auditBadges[gradePass].label))+2+width+2)
 	for _, f := range findings {
 		bd := auditBadges[f.Grade]
 		name := f.Name + strings.Repeat(" ", max(0, width-len([]rune(f.Name))))
 		fmt.Fprintf(b, "  %s  %s  %s\n", paint(bd.col, bd.label), paint(st.headerKey, name), f.Reason)
+		if fix && f.Fix != "" {
+			fmt.Fprintf(b, "%s%s\n", indent, paint(st.meta, "fix: "+f.Fix))
+		}
 	}
 }
 
@@ -767,7 +810,7 @@ func checkFindings(check string, findings []auditFinding, metrics map[string]any
 func runAudit(args []string) int {
 	var target, persona string
 	var headers []Header
-	var asJSON, checkMode bool
+	var asJSON, checkMode, showFix bool
 	timeout := defaultTimeout
 
 	usage := func(err error) int {
@@ -781,6 +824,8 @@ func runAudit(args []string) int {
 			asJSON = true
 		case arg == "--check" || arg == "--nagios":
 			checkMode = true
+		case arg == "--fix":
+			showFix = true
 		case arg == "-H" || arg == "--header":
 			val, err := nextArg(args, &i, arg)
 			if err != nil {
@@ -860,8 +905,7 @@ func runAudit(args []string) int {
 		out, _ := json.MarshalIndent(rep, "", "  ")
 		fmt.Fprintln(outW, string(out))
 	default:
-		color := stdoutIsTTY() && os.Getenv("NO_COLOR") == ""
-		fmt.Fprint(outW, renderAudit(rep, newStyles(), color))
+		fmt.Fprint(outW, ttyWrap(renderAudit(rep, newStyles(), auditColor(), showFix)))
 	}
 	return 0
 }
