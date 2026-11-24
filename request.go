@@ -623,6 +623,14 @@ func resolveSpec(spec RequestSpec) RequestSpec {
 	return spec
 }
 
+// userAgent is the User-Agent weeb sends by default, "weeb/0.6.1": Go's own
+// "Go-http-client/1.1" reads as a generic bot to CDNs and WAFs, which can
+// then answer weeb differently than they would a named client.
+var userAgent = sync.OnceValue(func() string {
+	v, _ := buildVersion()
+	return "weeb/" + strings.TrimPrefix(v, "v")
+})
+
 func buildRequest(spec RequestSpec) (*http.Request, error) {
 	method := strings.ToUpper(strings.TrimSpace(spec.Method))
 	if method == "" {
@@ -646,6 +654,12 @@ func buildRequest(spec RequestSpec) (*http.Request, error) {
 			continue
 		}
 		req.Header.Add(h.Key, h.Value)
+	}
+	// weeb names itself unless the request already has a User-Agent. A
+	// header that is present but empty (-H "User-Agent:") is kept, and Go
+	// then sends none, like curl.
+	if _, set := req.Header["User-Agent"]; !set {
+		req.Header.Set("User-Agent", userAgent())
 	}
 	if len(spec.envHeaderKeys) > 0 {
 		req = req.WithContext(context.WithValue(req.Context(), envHeaderKeysCtx{}, spec.envHeaderKeys))
